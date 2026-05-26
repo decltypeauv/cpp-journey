@@ -1,0 +1,14 @@
+# 构建产物
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.clangd/
+
+# 系统文件
+.DS_Store
+Thumbs.db
