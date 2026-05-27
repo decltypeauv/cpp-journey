@@ -58,6 +58,17 @@ public:
     }
   }
 
+  // 读取一行，返回读取的字符数（不含换行），EOF 返回 0
+  size_t readln(char *buf, size_t bufsize) {
+    if (!_file || !fgets(buf, static_cast<int>(bufsize), _file))
+      return 0;
+    // 去掉末尾换行
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n')
+      buf[len - 1] = '\0';
+    return len;
+  }
+
   bool is_open() const { return _file != nullptr; }
 
 private:
@@ -70,25 +81,38 @@ private:
 // ============================================================
 class HeapArray {
 public:
-  // TODO 2.1: 构造函数 — 分配 size 个 int，全部初始化为 0
-  explicit HeapArray(size_t size) {
-    // 在这里写
+  // 2.1: 构造函数 — 分配 size 个 int，全部初始化为 0
+  explicit HeapArray(size_t size) : size_(size) {
+    data_ = new int[size]{};  // {} 值初始化，全部为 0
   }
 
-  // TODO 2.2: 析构函数 — 释放内存
+  // 2.2: 析构函数 — 释放内存
   ~HeapArray() {
-    // 在这里写
+    delete[] data_;
   }
 
-  // TODO 2.3: 禁止拷贝
-  // HeapArray(const HeapArray&) = delete;
-  // HeapArray& operator=(const HeapArray&) = delete;
+  // 2.3: 禁止拷贝
+  HeapArray(const HeapArray &) = delete;
+  HeapArray &operator=(const HeapArray &) = delete;
 
-  // TODO 2.4: 移动构造
-  // HeapArray(HeapArray&& other) noexcept { ... }
+  // 2.4: 移动构造
+  HeapArray(HeapArray &&other) noexcept
+      : data_(other.data_), size_(other.size_) {
+    other.data_ = nullptr;
+    other.size_ = 0;
+  }
 
-  // TODO 2.5: 移动赋值
-  // HeapArray& operator=(HeapArray&& other) noexcept { ... }
+  // 2.5: 移动赋值
+  HeapArray &operator=(HeapArray &&other) noexcept {
+    if (this != &other) {
+      delete[] data_;
+      data_ = other.data_;
+      size_ = other.size_;
+      other.data_ = nullptr;
+      other.size_ = 0;
+    }
+    return *this;
+  }
 
   size_t size() const { return size_; }
 
@@ -143,9 +167,13 @@ public:
   Timer(const char *name)
       : name_(name), start_(std::chrono::steady_clock::now()) {}
 
-  // TODO 4.1: 析构时计算耗时并输出 "Timer [name]: X ms"
+  // 4.1: 析构时计算耗时并输出 "Timer [name]: X ms"
   ~Timer() {
-    // 在这里写
+    auto end = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  end - start_)
+                  .count();
+    std::cout << "Timer [" << name_ << "]: " << ms << " ms\n";
   }
 
 private:
@@ -169,10 +197,8 @@ int main() {
   {
     FileGuard f("/tmp/test_raii.txt", "r");
     char buf[256];
-    while (f.is_open() && fgets(buf, sizeof(buf), /* FILE* */ nullptr)) {
-      // TODO: 你需要想办法暴露底层的 FILE* 或增加一个 read 方法
-      // 这一步在想：面对这种需求，应该怎么设计接口？
-      std::cout << "  " << buf;
+    while (f.readln(buf, sizeof(buf)) > 0) {
+      std::cout << "  " << buf << "\n";
     }
   }
   std::cout << "\n";
@@ -189,7 +215,10 @@ int main() {
       std::cout << " " << a[i];
     std::cout << "\n";
 
-    // TODO: 验证移动语义 — 把 a 移动到 b，然后检查 a.size() 是否为 0
+    // 验证移动语义 — 把 a 移动到 b，然后检查 a.size() 是否为 0
+    HeapArray b(std::move(a));
+    std::cout << "移动后 a.size() = " << a.size()
+              << " (应为0), b.size() = " << b.size() << "\n";
   }
   std::cout << "\n";
 
