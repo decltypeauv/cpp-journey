@@ -57,16 +57,10 @@ public:
       fprintf(_file, "%s\n", text);
     }
   }
-
-  // 读取一行，返回读取的字符数（不含换行），EOF 返回 0
-  size_t readln(char *buf, size_t bufsize) {
-    if (!_file || !fgets(buf, static_cast<int>(bufsize), _file))
-      return 0;
-    // 去掉末尾换行
-    size_t len = strlen(buf);
-    if (len > 0 && buf[len - 1] == '\n')
-      buf[len - 1] = '\0';
-    return len;
+  bool readln(char *buf, int size) {
+    if (!_file)
+      return false;
+    return fgets(buf, size, _file) != nullptr;
   }
 
   bool is_open() const { return _file != nullptr; }
@@ -81,47 +75,51 @@ private:
 // ============================================================
 class HeapArray {
 public:
-  // 2.1: 构造函数 — 分配 size 个 int，全部初始化为 0
-  explicit HeapArray(size_t size) : size_(size) {
-    data_ = new int[size]{};  // {} 值初始化，全部为 0
+  // TODO 2.1: 构造函数 — 分配 size 个 int，全部初始化为 0
+  explicit HeapArray(size_t size) : _size(size) {
+    _data = new int[_size]{}; // 在这里写
   }
 
-  // 2.2: 析构函数 — 释放内存
+  // TODO 2.2: 析构函数 — 释放内存
   ~HeapArray() {
-    delete[] data_;
+    delete[] _data; // 在这里写
   }
 
-  // 2.3: 禁止拷贝
+  // TODO 2.3: 禁止拷贝
   HeapArray(const HeapArray &) = delete;
   HeapArray &operator=(const HeapArray &) = delete;
+  // HeapArray(const HeapArray&) = delete;
+  // HeapArray& operator=(const HeapArray&) = delete;
 
-  // 2.4: 移动构造
+  // TODO 2.4: 移动构造
+  // HeapArray(HeapArray&& other) noexcept { ... }
   HeapArray(HeapArray &&other) noexcept
-      : data_(other.data_), size_(other.size_) {
-    other.data_ = nullptr;
-    other.size_ = 0;
+      : _data(other._data), _size(other._size) {
+    other._data = nullptr;
+    other._size = 0;
   }
 
-  // 2.5: 移动赋值
+  // TODO 2.5: 移动赋值
+  // HeapArray& operator=(HeapArray&& other) noexcept { ... }
   HeapArray &operator=(HeapArray &&other) noexcept {
     if (this != &other) {
-      delete[] data_;
-      data_ = other.data_;
-      size_ = other.size_;
-      other.data_ = nullptr;
-      other.size_ = 0;
+      delete[] _data;
+      _data = other._data;
+      _size = other._size;
+      other._data = nullptr;
+      other._size = 0;
     }
     return *this;
   }
 
-  size_t size() const { return size_; }
+  size_t size() const { return _size; }
 
-  int &operator[](size_t i) { return data_[i]; }
-  const int &operator[](size_t i) const { return data_[i]; }
+  int &operator[](size_t i) { return _data[i]; }
+  const int &operator[](size_t i) const { return _data[i]; }
 
 private:
-  int *data_ = nullptr;
-  size_t size_ = 0;
+  int *_data = nullptr;
+  size_t _size = 0;
 };
 
 // ============================================================
@@ -167,13 +165,13 @@ public:
   Timer(const char *name)
       : name_(name), start_(std::chrono::steady_clock::now()) {}
 
-  // 4.1: 析构时计算耗时并输出 "Timer [name]: X ms"
+  // TODO 4.1: 析构时计算耗时并输出 "Timer [name]: X ms"
   ~Timer() {
     auto end = std::chrono::steady_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  end - start_)
-                  .count();
-    std::cout << "Timer [" << name_ << "]: " << ms << " ms\n";
+    auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start_)
+            .count();
+    std::cout << "Timer [" << name_ << "]: " << ms << "ms" << std::endl;
   }
 
 private:
@@ -197,7 +195,7 @@ int main() {
   {
     FileGuard f("/tmp/test_raii.txt", "r");
     char buf[256];
-    while (f.readln(buf, sizeof(buf)) > 0) {
+    while (f.readln(buf, sizeof(buf))) {
       std::cout << "  " << buf << "\n";
     }
   }
