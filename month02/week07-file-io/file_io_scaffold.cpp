@@ -4,9 +4,9 @@
 //
 // Month 2 开始！从本周起，我们走出纯语言特性，进入程序与操作系统的交互领域。
 
-#include <sys/stat.h>  // open
-#include <fcntl.h>      // open flags
-#include <unistd.h>     // read, write, close
+#include <fcntl.h>    // open flags
+#include <sys/stat.h> // open
+#include <unistd.h>   // read, write, close
 
 #include <cstring>
 #include <filesystem>
@@ -34,7 +34,7 @@ void exercise1_fstream_basics() {
 
   // TODO 1.1: 写文件 — ofstream
   {
-    std::ofstream out(filename);  // 默认 text mode，自动创建/覆盖
+    std::ofstream out(filename); // 默认 text mode，自动创建/覆盖
     if (!out.is_open()) {
       cout << "  ❌ 无法打开文件写入: " << filename << "\n";
       return;
@@ -44,7 +44,7 @@ void exercise1_fstream_basics() {
     out << "第三行: " << 3.14159 << "\n";
 
     cout << "  写入完成，文件句柄即将自动关闭（RAII）\n";
-  }  // out 析构 → 自动 close，即使中途有异常也会关
+  } // out 析构 → 自动 close，即使中途有异常也会关
 
   // TODO 1.2: 读文件 — ifstream，逐行读取
   {
@@ -64,7 +64,7 @@ void exercise1_fstream_basics() {
 
   // TODO 1.3: 追加模式 — ios::app
   {
-    std::ofstream out(filename, std::ios::app);  // append
+    std::ofstream out(filename, std::ios::app); // append
     out << "第四行: 追加的内容\n";
     cout << "  追加了一行\n";
   }
@@ -106,13 +106,13 @@ void exercise2_stream_states() {
   // 写一个整数文件
   {
     std::ofstream out(filename);
-    out << "123\n456\nabc\n789\n";  // abc 不是整数！
+    out << "123\n456\nabc\n789\n"; // abc 不是整数！
   }
 
   {
     std::ifstream in(filename);
     int val;
-    while (in >> val) {  // operator>> 返回流引用，隐式转 bool = !fail()
+    while (in >> val) { // operator>> 返回流引用，隐式转 bool = !fail()
       cout << "  读到整数: " << val << "\n";
     }
     // 当读到 "abc" 时 >> 失败，failbit 被设置，循环结束
@@ -122,8 +122,8 @@ void exercise2_stream_states() {
     } else if (in.fail()) {
       cout << "  原因: failbit 被设置（格式错误）\n";
       // failbit 可以被清除！
-      in.clear();   // 清除 failbit
-      in.ignore(100, '\n');  // 跳过当前行
+      in.clear();           // 清除 failbit
+      in.ignore(100, '\n'); // 跳过当前行
       if (in >> val) {
         cout << "  恢复后读到: " << val << "\n";
       }
@@ -181,7 +181,7 @@ void exercise2_stream_states() {
 struct DataRecord {
   int32_t _id;
   double _value;
-  char _name[32];  // 定长字符数组，适合二进制 I/O
+  char _name[32]; // 定长字符数组，适合二进制 I/O
 };
 
 void exercise3_binary_io() {
@@ -192,7 +192,8 @@ void exercise3_binary_io() {
   // TODO 3.1: 写二进制文件
   {
     std::ofstream out(filename, std::ios::binary);
-    //                                      ^^^^^^^^^^^^^ 关键！否则换行符会被转换
+    //                                      ^^^^^^^^^^^^^
+    //                                      关键！否则换行符会被转换
 
     vector<DataRecord> records = {
         {1, 3.14, "pi"},
@@ -216,14 +217,14 @@ void exercise3_binary_io() {
     cout << "  读取记录:\n";
     DataRecord rec;
     while (in.read(reinterpret_cast<char *>(&rec), sizeof(rec))) {
-      cout << "    id=" << rec._id
-           << "  value=" << rec._value
+      cout << "    id=" << rec._id << "  value=" << rec._value
            << "  name=" << rec._name << "\n";
     }
 
     // gcount() 返回上次 read 实际读了多少字节
     // 如果文件大小不是 sizeof(DataRecord) 的整数倍，最后一条不完整
-    if (in.gcount() > 0 && in.gcount() < static_cast<std::streamsize>(sizeof(rec))) {
+    if (in.gcount() > 0 &&
+        in.gcount() < static_cast<std::streamsize>(sizeof(rec))) {
       cout << "  ⚠ 最后一条记录不完整，只读了 " << in.gcount() << " 字节\n";
     }
   }
@@ -236,7 +237,8 @@ void exercise3_binary_io() {
     // 文本模式 — 存 "1\n20\n300\n4000\n" = 13 字节
     {
       std::ofstream out("/tmp/cpp-journey-week07-text.txt");
-      for (int n : nums) out << n << '\n';
+      for (int n : nums)
+        out << n << '\n';
     }
 
     // 二进制模式 — 存 4 × sizeof(int) = 16 字节
@@ -245,7 +247,8 @@ void exercise3_binary_io() {
       out.write(reinterpret_cast<const char *>(&nums), sizeof(nums));
     }
 
-    auto text_sz = std::filesystem::file_size("/tmp/cpp-journey-week07-text.txt");
+    auto text_sz =
+        std::filesystem::file_size("/tmp/cpp-journey-week07-text.txt");
     auto bin_sz = std::filesystem::file_size("/tmp/cpp-journey-week07-bin.bin");
 
     cout << "\n  对比:\n";
@@ -326,8 +329,8 @@ void exercise4_filesystem() {
       if (it->is_directory()) {
         cout << "📁 " << it->path().filename().string() << "/\n";
       } else {
-        cout << "📄 " << it->path().filename().string()
-             << " (" << it->file_size() << " bytes)\n";
+        cout << "📄 " << it->path().filename().string() << " ("
+             << it->file_size() << " bytes)\n";
       }
     }
   }
@@ -362,7 +365,8 @@ void exercise4_filesystem() {
     cout << "    fs::space(p)      — 磁盘空间信息（总/可用/剩余）\n";
 
     // C++20 可以用 last_write_time 获取修改时间，这里只演示存在性
-    cout << "    file_1.txt 存在: " << fs::exists(test_dir / "file_1.txt") << "\n";
+    cout << "    file_1.txt 存在: " << fs::exists(test_dir / "file_1.txt")
+         << "\n";
   }
 
   // TODO 4.6: 复制、重命名、删除
@@ -395,7 +399,7 @@ void exercise4_filesystem() {
 class FileDescriptor {
   int _fd;
 
- public:
+public:
   FileDescriptor() : _fd(-1) {}
 
   explicit FileDescriptor(int fd) : _fd(fd) {
@@ -414,7 +418,8 @@ class FileDescriptor {
   }
   FileDescriptor &operator=(FileDescriptor &&other) noexcept {
     if (this != &other) {
-      if (_fd >= 0) ::close(_fd);
+      if (_fd >= 0)
+        ::close(_fd);
       _fd = other._fd;
       other._fd = -1;
     }
@@ -457,7 +462,7 @@ void exercise5_posix_fd() {
     } else {
       cout << "  写入了 " << written << " 字节\n";
     }
-  }  // fd 析构 → ::close(fd)，即使前面 throw 也会关
+  } // fd 析构 → ::close(fd)，即使前面 throw 也会关
 
   // TODO 5.3: 用 POSIX 接口读文件
   {
@@ -468,7 +473,7 @@ void exercise5_posix_fd() {
     if (n < 0) {
       cout << "  ❌ read 失败: " << std::strerror(errno) << "\n";
     } else {
-      buf[n] = '\0';  // 手动加 null terminator
+      buf[n] = '\0'; // 手动加 null terminator
       cout << "  读到了 " << n << " 字节:\n";
       cout << "  ---\n" << buf << "  ---\n";
       if (n == static_cast<ssize_t>(sizeof(buf) - 1)) {
@@ -514,7 +519,7 @@ class LogWriter {
   string _path;
   size_t _line_count = 0;
 
- public:
+public:
   explicit LogWriter(string path) : _path(std::move(path)) {
     // 追加模式打开，每行立即刷新（对于日志很重要！）
     _file.open(_path, std::ios::app);
@@ -526,7 +531,7 @@ class LogWriter {
   }
 
   void info(const string &msg) {
-    _file << "[INFO]  " << msg << std::endl;  // endl 会 flush
+    _file << "[INFO]  " << msg << std::endl; // endl 会 flush
     ++_line_count;
   }
 
@@ -557,8 +562,9 @@ void exercise6_real_world() {
     logger.error("处理失败: 超时");
     logger.info("重试成功");
 
-    cout << "  写入了 " << logger.line_count() << " 条日志到 " << logger.path() << "\n";
-  }  // logger 析构 → 文件关闭
+    cout << "  写入了 " << logger.line_count() << " 条日志到 " << logger.path()
+         << "\n";
+  } // logger 析构 → 文件关闭
 
   // 验证: 读取日志文件
   {
@@ -589,7 +595,7 @@ void exercise7_stringstream() {
     oss << "整数: " << 42 << ", 浮点: " << std::fixed << 3.14159;
     oss << ", hex: " << std::hex << 255;
 
-    string result = oss.str();  // 拿到完整字符串
+    string result = oss.str(); // 拿到完整字符串
     cout << "  ostringstream: " << result << "\n";
   }
 
@@ -614,7 +620,7 @@ void exercise7_stringstream() {
       string id, name, score;
       std::getline(line_ss, id, ',');
       std::getline(line_ss, name, ',');
-      std::getline(line_ss, score, ',');  // 第三个分隔符是 ',' 但后面是 '\n'
+      std::getline(line_ss, score, ','); // 第三个分隔符是 ',' 但后面是 '\n'
       cout << "    id=" << id << " name=" << name << " score=" << score << "\n";
     }
   }
