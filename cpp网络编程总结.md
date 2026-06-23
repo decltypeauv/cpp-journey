@@ -133,6 +133,176 @@
 epoll(LT/ET) + 非阻塞 IO + EPOLLRDHUP + Connection* ptr + timerfd 心跳
 ```
 
-## Week 14: HTTP 协议 + 简易 HTTP Server (待学习)
+## Week 14: HTTP 协议 + 简易 HTTP Server (2026-06-23)
 
-## Week 15: 网络服务实战 (待学习)
+### HTTP 请求格式
+```
+METHOD SP URI SP VERSION CRLF
+Header-Name: value CRLF
+...
+CRLF       ← 空行 (header 结束)
+[body]     ← 可选, 长度由 Content-Length 决定
+```
+
+### HTTP 响应格式
+```
+VERSION SP STATUS-CODE SP REASON-PHRASE CRLF
+Header-Name: value CRLF
+...
+CRLF
+[body]
+```
+
+### 关键规则
+- **CRLF (`\r\n`)** 是 HTTP 的行分隔符, 空行标记 header 结束
+- **HTTP/1.1 默认 Keep-Alive**: 一个 TCP 连接处理多个请求
+- **Connection: close**: 客户端/服务器声明要关闭连接
+- **Content-Length**: 告知 body 的精确长度 (字节) — 静态文件首选
+- **Transfer-Encoding: chunked**: 分块传输 — 动态内容/流式传输
+- **Host header**: HTTP/1.1 必须, 支持虚拟主机
+
+### URL 结构
+```
+scheme://user:pass@host:port/path?query#fragment
+```
+- 请求行中的 URI 只包含 path + query (不含 scheme/host)
+- Host header 提供 host:port
+
+### MIME 类型
+- 根据文件扩展名确定 Content-Type
+- text/* 类型加 `charset=utf-8`
+- 未知类型 → `application/octet-stream`
+
+### 请求解析流程
+1. 读请求行 → METHOD, URI, VERSION
+2. 逐行读头部 → 直到空行 (`\r\n\r\n`)
+3. 检查 Content-Length → 读 N 字节 body
+4. 头部名转小写 (大小写不敏感)
+
+### Content-Length vs chunked
+| | Content-Length | chunked |
+|---|---|---|
+| 提前知道大小 | ✅ 需要 | ❌ 不需要 |
+| 适合场景 | 静态文件 | 动态生成 |
+| 实现复杂度 | 简单 | 中等 |
+
+### 安全防御清单
+1. 路径检查: 拒绝包含 `..` 的路径 (目录遍历攻击)
+2. 大小限制: 请求行/header/body 都设上限
+3. 超时控制: 请求超时 30s, Keep-Alive 空闲超时 5s
+4. URL 解码: 先解码再检查路径 (防止 `%2e%2e%2f` 绕过)
+5. realpath(): 验证最终路径在文档根目录内
+6. Slowloris 防御: 最小数据速率检测
+
+### Keep-Alive 机制
+- HTTP/1.1 默认启用
+- 减少 TCP 握手开销和 TIME_WAIT
+- 需要: Content-Length (确定 body 边界) + 空闲超时
+- 响应头: `Connection: keep-alive` 或 `Connection: close`
+
+### 架构模式
+```
+静态文件 HTTP Server =
+  epoll(accept/read) + HTTP 请求解析 + 路径安全检查 +
+  read_file + MIME 检测 + 响应构建 + TCP 发送
+```
+
+### 核心洞察
+> 「HTTP Server 本质上就是: 解析文本请求 → 构建文本响应 → 通过 TCP 发送」
+> 没有魔法, 全是字符串操作。约 500 行 C++20 代码就能实现可浏览器访问的 HTTP Server。
+
+## Week 15: 网络服务实战 (2026-06-23)
+
+### 聊天室广播模型
+```
+Client A ── "Hello" ──▶ Server ──broadcast──▶ Client B, C, D...
+```
+- `for (auto *c : _clients) send(c->fd, msg)` — O(n) 广播
+- 优化: writev() 一次系统调用发多份
+
+### 聊天协议: [4B len][1B type][data]
+| Type | 值 | 含义 |
+|------|------|------|
+| LOGIN | 0x01 | 登录 (data=昵称) |
+| MSG | 0x02 | 聊天消息 |
+| LOGOUT | 0x03 | 退出 |
+| SYSTEM | 0x04 | 服务器通知 |
+| PING | 0x05 | 心跳请求 |
+| PONG | 0x06 | 心跳回复 |
+
+### 用户管理
+- `vector<ChatUser*>` — 简单场景; `unordered_map<int, ChatUser*>` — O(1) 查找
+- 加入/离开/改名 → SYSTEM 广播通知所有用户
+
+### 心跳检测 (timerfd + epoll)
+- 一个全局 timerfd 管所有连接的超时
+- 每 N 秒遍历连接列表, 超时 T 秒未活跃 → 断开
+- 发 PING 后 M 秒未收到 PONG → 断开
+
+### HTTP 正向代理
+```
+Client → Proxy → parse URL → connect target → forward req → forward resp → Client
+```
+- 请求 URI 是完整 URL: `GET http://example.com/path HTTP/1.1`
+- 代理提取 host:port, 转发 `GET /path HTTP/1.1` 到目标
+
+### CONNECT 隧道 (HTTPS 代理基础)
+```
+Client → CONNECT host:443 → Proxy → 200 Established → 纯 TCP 双向转发
+```
+- 代理不解包内容 (TLS 加密解不开)
+- relay_one_way(client→target) + relay_one_way(target→client)
+
+### TCP 端口转发
+```
+relay_one_way(from_fd, to_fd):
+  recv(from) → send(to)
+  recv==0 → shutdown(to, SHUT_WR)  // 半关闭传递
+```
+- 生产级: epoll 同时监控两个 fd
+- 缓冲区大小: 8KB–64KB 典型值
+
+### 负载均衡策略
+| 策略 | 优势 | 劣势 |
+|------|------|------|
+| Round Robin | 简单公平 | 不考虑负载 |
+| Least Connections | 自适应 | 需跟踪连接数 |
+| Weighted | 利用异构 | 需要配置权重 |
+| IP Hash | 会话保持 | 分布不均 |
+
+### 架构模式
+```
+网络服务 =
+  Socket API (TCP/UDP) + epoll (多路复用) +
+  协议解析 (长度前缀/HTTP/自定义) + 业务逻辑 +
+  安全防御 (超时/大小限制/路径检查)
+```
+
+### 核心能力
+> 「你可以构建任何基于 TCP 的网络服务」
+> 聊天室、代理、隧道、负载均衡 — 本质上都是 Socket + epoll + 协议解析
+
+## Week 16: Month 3 收官 (2026-06-23)
+
+### Part A: W11-15 回顾
+W11 Socket 基础 → W12 TCP 深入 → W13 epoll → W14 HTTP → W15 服务
+
+### Part B: 性能对比
+- select: O(n), FD_SETSIZE=1024
+- poll: O(n), 无 fd 限制
+- epoll: O(1) 就绪链表, 红黑树管理, 大规模显著领先
+
+### Part C: Mini-Redis (RESP 协议 KV 存储)
+**RESP 类型**: +Simple String, -Error, :Integer, $Bulk String, *Array
+**KV 引擎**: unordered_map + lazy expire + cleanup_expired
+**AOF**: 写命令追加到文件 → 重启时重放恢复
+
+### Month 3 总结
+> 「我可以用 C++ 构建任何基于 TCP 的网络服务」
+> Socket → TCP 深入 → epoll → 协议解析 → 服务 → 生产级
+
+- 6 周 (W11-16), 60 个练习, 全部完成 ✅
+- 项目: HTTP Server, 聊天室, 代理, 隧道, 负载均衡器, Mini-Redis
+- 万能公式: **Socket + epoll + 协议解析 + 业务逻辑 + 安全防御**
+
+## Month 4: 极致性能 (下一步)
