@@ -12,19 +12,19 @@
 // 本文件包含可运行的示例，每个练习都是自包含的。
 // Socket API 函数在出错时返回 -1 并设置 errno。
 
-#include <arpa/inet.h>   // inet_pton, inet_ntop, htons, htonl
-#include <cerrno>        // errno
-#include <cstring>       // memset, strerror, memcpy
-#include <fcntl.h>       // fcntl
+#include <arpa/inet.h> // inet_pton, inet_ntop, htons, htonl
+#include <cerrno>      // errno
+#include <cstring>     // memset, strerror, memcpy
+#include <fcntl.h>     // fcntl
 #include <iostream>
 #include <netdb.h>       // getaddrinfo, freeaddrinfo, gai_strerror
 #include <netinet/in.h>  // sockaddr_in, sockaddr_in6, IPPROTO_TCP
 #include <netinet/tcp.h> // TCP_NODELAY
 #include <string>
-#include <sys/socket.h>  // socket, bind, listen, accept, connect, send, recv
+#include <sys/socket.h> // socket, bind, listen, accept, connect, send, recv
 #include <sys/types.h>
 #include <thread>
-#include <unistd.h>      // close, read, write, sleep
+#include <unistd.h> // close, read, write, sleep
 
 using std::cout;
 using std::string;
@@ -34,9 +34,7 @@ using std::string;
 // ============================================================
 
 // 辅助: 打印分隔线
-void section(const string &title) {
-  cout << "\n=== " << title << " ===\n";
-}
+void section(const string &title) { cout << "\n=== " << title << " ===\n"; }
 
 // 辅助: 检查系统调用结果，出错时打印并退出
 // 实际项目中应抛异常或返回 std::expected (C++23)
@@ -56,7 +54,8 @@ class ScopedFd {
 public:
   explicit ScopedFd(int fd = -1) : _fd(fd) {}
   ~ScopedFd() {
-    if (_fd >= 0) close(_fd);
+    if (_fd >= 0)
+      close(_fd);
   }
   // 禁止拷贝（文件描述符是独占资源）
   ScopedFd(const ScopedFd &) = delete;
@@ -65,18 +64,19 @@ public:
   ScopedFd(ScopedFd &&other) noexcept : _fd(other._fd) { other._fd = -1; }
   ScopedFd &operator=(ScopedFd &&other) noexcept {
     if (this != &other) {
-      if (_fd >= 0) close(_fd);
-      _fd       = other._fd;
+      if (_fd >= 0)
+        close(_fd);
+      _fd = other._fd;
       other._fd = -1;
     }
     return *this;
   }
-  int  get() const { return _fd; }
+  int get() const { return _fd; }
   bool valid() const { return _fd >= 0; }
   // 允许直接传给 C API（需要时）
-  int  release() {
+  int release() {
     int fd = _fd;
-    _fd    = -1;
+    _fd = -1;
     return fd;
   }
 };
@@ -168,7 +168,7 @@ void exercise2_address_structures() {
   {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(8080); // 主机字节序 → 网络字节序
+    addr.sin_port = htons(8080); // 主机字节序 → 网络字节序
 
     // inet_pton: "presentation" (字符串) → "network" (二进制)
     // 比旧的 inet_addr() 更安全，支持 IPv6
@@ -188,7 +188,7 @@ void exercise2_address_structures() {
   {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(8080);
+    addr.sin_port = htons(8080);
     inet_pton(AF_INET, "192.168.1.100", &addr.sin_addr);
 
     char buf[INET_ADDRSTRLEN]; // IPv4 地址最长 15 字符 + null
@@ -199,8 +199,8 @@ void exercise2_address_structures() {
   // TODO 2.3: 字节序转换
   {
     uint16_t host_port = 8080;
-    uint16_t net_port  = htons(host_port);
-    uint16_t back      = ntohs(net_port);
+    uint16_t net_port = htons(host_port);
+    uint16_t back = ntohs(net_port);
 
     cout << "\n  字节序演示:\n";
     cout << "    主机字节序: " << host_port << "\n";
@@ -253,13 +253,14 @@ void exercise3_tcp_server() {
     // 2. 设置 SO_REUSEADDR — 允许重启后立即绑定同一端口
     //    没有这个选项的话，服务器关闭后端口会有一段 TIME_WAIT 期
     int optval = 1;
-    CHECK(setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)),
+    CHECK(setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &optval,
+                     sizeof(optval)),
           "setsockopt");
 
     // 3. bind — 绑定到 0.0.0.0:12345
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(12345);
+    addr.sin_port = htons(12345);
     addr.sin_addr.s_addr = INADDR_ANY; // 0.0.0.0 — 监听所有接口
     CHECK(bind(listen_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)),
           "bind");
@@ -274,13 +275,15 @@ void exercise3_tcp_server() {
     // 5. accept — 等待客户端连接
     //    accept 是阻塞的: 没有客户端连接时会一直等待
     //    返回的 client_fd 是新的 socket，用于和这个客户端通信
-    cout << "  ⏳ 等待连接... (在另一个终端运行 ./build/socket_basics client 来连接)\n";
+    cout << "  ⏳ 等待连接... (在另一个终端运行 ./build/socket_basics client "
+            "来连接)\n";
 
     sockaddr_in client_addr{};
-    socklen_t   client_addr_len = sizeof(client_addr);
+    socklen_t client_addr_len = sizeof(client_addr);
 
     int client_fd =
-        accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len);
+        accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr),
+               &client_addr_len);
     CHECK(client_fd, "accept");
     ScopedFd client_guard(client_fd);
 
@@ -350,22 +353,23 @@ void exercise4_tcp_client() {
   // 首先启动一个简单的服务器线程，这样客户端有地方可连
   std::thread server_thread([]() {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return;
+    if (fd < 0)
+      return;
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
     sockaddr_in addr{};
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(12346);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(12346);
     addr.sin_addr.s_addr = INADDR_ANY;
     (void)bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
     (void)listen(fd, 1);
 
     sockaddr_in client_addr{};
-    socklen_t   client_len = sizeof(client_addr);
-    int         client_fd  = accept(fd, reinterpret_cast<sockaddr *>(&client_addr),
-                                    &client_len);
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd =
+        accept(fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
     if (client_fd >= 0) {
       // 接收并回显
       char buf[256];
@@ -392,9 +396,8 @@ void exercise4_tcp_client() {
     // 2. 构建目标地址
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port   = htons(12346);
-    CHECK(inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr),
-          "inet_pton");
+    server_addr.sin_port = htons(12346);
+    CHECK(inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr), "inet_pton");
 
     // 3. connect — 发起连接
     int ret = connect(fd, reinterpret_cast<sockaddr *>(&server_addr),
@@ -404,11 +407,11 @@ void exercise4_tcp_client() {
 
     // 4. 发送数据
     const char *msg = "Hello from client!";
-    ssize_t     sent = send(fd, msg, strlen(msg), 0);
+    ssize_t sent = send(fd, msg, strlen(msg), 0);
     cout << "  📤 发送了 " << sent << " 字节: \"" << msg << "\"\n";
 
     // 5. 接收响应
-    char    buf[256];
+    char buf[256];
     ssize_t received = recv(fd, buf, sizeof(buf) - 1, 0);
     if (received > 0) {
       buf[received] = '\0';
@@ -468,7 +471,8 @@ void exercise5_setsockopt() {
     CHECK(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)),
           "setsockopt SO_REUSEADDR");
     cout << "  ✅ SO_REUSEADDR = 1\n";
-    cout << "    作用: 服务器重启后立即可绑定同一端口（避免\"Address already in use\"）\n";
+    cout << "    作用: 服务器重启后立即可绑定同一端口（避免\"Address already "
+            "in use\"）\n";
   }
 
   // TODO 5.2: SO_KEEPALIVE — TCP 保活
@@ -529,12 +533,12 @@ void exercise6_getaddrinfo() {
   // TODO 6.1: 解析本地地址
   {
     addrinfo hints{};
-    hints.ai_family   = AF_INET;      // 只要 IPv4
-    hints.ai_socktype = SOCK_STREAM;  // TCP
-    hints.ai_flags    = AI_PASSIVE;   // 用于 bind (适合服务器)
+    hints.ai_family = AF_INET;       // 只要 IPv4
+    hints.ai_socktype = SOCK_STREAM; // TCP
+    hints.ai_flags = AI_PASSIVE;     // 用于 bind (适合服务器)
 
     addrinfo *res = nullptr;
-    int       ret = getaddrinfo(nullptr, "8080", &hints, &res);
+    int ret = getaddrinfo(nullptr, "8080", &hints, &res);
     if (ret != 0) {
       cout << "  ❌ getaddrinfo 失败: " << gai_strerror(ret) << "\n";
     } else {
@@ -543,8 +547,8 @@ void exercise6_getaddrinfo() {
         char ip_str[INET_ADDRSTRLEN];
         auto *addr_in = reinterpret_cast<sockaddr_in *>(rp->ai_addr);
         inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
-        cout << "  ✅ 地址: " << ip_str << ", 端口: "
-             << ntohs(addr_in->sin_port) << "\n";
+        cout << "  ✅ 地址: " << ip_str
+             << ", 端口: " << ntohs(addr_in->sin_port) << "\n";
       }
       freeaddrinfo(res); // 必须释放！
       cout << "  ✅ freeaddrinfo 已调用\n";
@@ -554,7 +558,7 @@ void exercise6_getaddrinfo() {
   // TODO 6.2: 解析域名
   {
     addrinfo hints{};
-    hints.ai_family   = AF_INET;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
     addrinfo *res = nullptr;
@@ -564,7 +568,7 @@ void exercise6_getaddrinfo() {
       cout << "  localhost 解析: " << gai_strerror(ret) << "\n";
     } else {
       auto *addr_in = reinterpret_cast<sockaddr_in *>(res->ai_addr);
-      char  ip_str[INET_ADDRSTRLEN];
+      char ip_str[INET_ADDRSTRLEN];
       inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, sizeof(ip_str));
       cout << "  ✅ localhost → " << ip_str << ":" << ntohs(addr_in->sin_port)
            << "\n";
@@ -577,11 +581,11 @@ void exercise6_getaddrinfo() {
     cout << "\n  客户端模式 (不设置 AI_PASSIVE):\n";
 
     addrinfo hints{};
-    hints.ai_family   = AF_INET;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
     addrinfo *res = nullptr;
-    int       ret = getaddrinfo("127.0.0.1", "80", &hints, &res);
+    int ret = getaddrinfo("127.0.0.1", "80", &hints, &res);
     if (ret == 0) {
       cout << "  ✅ 客户端地址解析成功\n";
       cout << "    可以用 res->ai_addr 直接传给 connect()\n";
@@ -616,26 +620,30 @@ constexpr int ECHO_PORT = 12347;
 // 单线程 echo 服务器（一次只能服务一个客户端）
 void run_echo_server() {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return;
+  if (fd < 0)
+    return;
   ScopedFd guard(fd);
 
   int optval = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
   sockaddr_in addr{};
-  addr.sin_family      = AF_INET;
-  addr.sin_port        = htons(ECHO_PORT);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(ECHO_PORT);
   addr.sin_addr.s_addr = INADDR_ANY;
-  if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) return;
-  if (listen(fd, 1) < 0) return;
+  if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+    return;
+  if (listen(fd, 1) < 0)
+    return;
 
   cout << "  [Echo Server] 监听 0.0.0.0:" << ECHO_PORT << "\n";
 
   sockaddr_in client_addr{};
-  socklen_t   client_len = sizeof(client_addr);
-  int         client_fd  = accept(fd, reinterpret_cast<sockaddr *>(&client_addr),
-                                  &client_len);
-  if (client_fd < 0) return;
+  socklen_t client_len = sizeof(client_addr);
+  int client_fd =
+      accept(fd, reinterpret_cast<sockaddr *>(&client_addr), &client_len);
+  if (client_fd < 0)
+    return;
   ScopedFd client_guard(client_fd);
 
   char client_ip[INET_ADDRSTRLEN];
@@ -648,14 +656,17 @@ void run_echo_server() {
   for (int i = 0; i < 5; ++i) { // 最多收发 5 轮
     ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
     if (n <= 0) {
-      if (n == 0) cout << "  [Echo Server] 客户端关闭了连接\n";
-      else cout << "  [Echo Server] recv 错误: " << std::strerror(errno) << "\n";
+      if (n == 0)
+        cout << "  [Echo Server] 客户端关闭了连接\n";
+      else
+        cout << "  [Echo Server] recv 错误: " << std::strerror(errno) << "\n";
       break;
     }
     buf[n] = '\0';
     // 去掉末尾的换行（美观）
     string msg(buf);
-    if (!msg.empty() && msg.back() == '\n') msg.pop_back();
+    if (!msg.empty() && msg.back() == '\n')
+      msg.pop_back();
     cout << "  [Echo Server] 收到: \"" << msg << "\", 回显\n";
 
     send(client_fd, buf, n, MSG_NOSIGNAL);
@@ -667,15 +678,17 @@ void run_echo_client() {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return;
+  if (fd < 0)
+    return;
   ScopedFd guard(fd);
 
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port   = htons(ECHO_PORT);
+  server_addr.sin_port = htons(ECHO_PORT);
   inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
 
-  if (connect(fd, reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr)) < 0) {
+  if (connect(fd, reinterpret_cast<sockaddr *>(&server_addr),
+              sizeof(server_addr)) < 0) {
     cout << "  [Echo Client] 连接失败: " << std::strerror(errno) << "\n";
     return;
   }
@@ -694,7 +707,8 @@ void run_echo_client() {
     if (n > 0) {
       buf[n] = '\0';
       string response(buf);
-      if (!response.empty() && response.back() == '\n') response.pop_back();
+      if (!response.empty() && response.back() == '\n')
+        response.pop_back();
       cout << "  [Echo Client] 收到: \"" << response << "\"\n";
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -731,25 +745,27 @@ constexpr int UDP_PORT = 12348;
 
 void run_udp_echo_server() {
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd < 0) return;
+  if (fd < 0)
+    return;
   ScopedFd guard(fd);
 
   sockaddr_in addr{};
-  addr.sin_family      = AF_INET;
-  addr.sin_port        = htons(UDP_PORT);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(UDP_PORT);
   addr.sin_addr.s_addr = INADDR_ANY;
   (void)bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
 
   cout << "  [UDP Server] 监听 0.0.0.0:" << UDP_PORT << "\n";
 
   // UDP: 用 recvfrom 接收（同时获取发送方地址）
-  char        buf[256];
+  char buf[256];
   sockaddr_in client_addr{};
-  socklen_t   client_len = sizeof(client_addr);
+  socklen_t client_len = sizeof(client_addr);
 
   for (int i = 0; i < 3; ++i) {
-    ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0,
-                         reinterpret_cast<sockaddr *>(&client_addr), &client_len);
+    ssize_t n =
+        recvfrom(fd, buf, sizeof(buf) - 1, 0,
+                 reinterpret_cast<sockaddr *>(&client_addr), &client_len);
     if (n > 0) {
       buf[n] = '\0';
       char ip[INET_ADDRSTRLEN];
@@ -758,7 +774,8 @@ void run_udp_echo_server() {
            << ntohs(client_addr.sin_port) << " 的消息: \"" << buf << "\"\n";
 
       // echo 回去
-      sendto(fd, buf, n, 0, reinterpret_cast<sockaddr *>(&client_addr), client_len);
+      sendto(fd, buf, n, 0, reinterpret_cast<sockaddr *>(&client_addr),
+             client_len);
     }
   }
 }
@@ -767,26 +784,27 @@ void run_udp_client() {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd < 0) return;
+  if (fd < 0)
+    return;
   ScopedFd guard(fd);
 
   sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port   = htons(UDP_PORT);
+  server_addr.sin_port = htons(UDP_PORT);
   inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
 
   const char *messages[] = {"Ping", "Pong", "Pang"};
   for (const auto *msg : messages) {
     cout << "  [UDP Client] 发送: \"" << msg << "\"\n";
-    sendto(fd, msg, strlen(msg), 0,
-           reinterpret_cast<sockaddr *>(&server_addr), sizeof(server_addr));
+    sendto(fd, msg, strlen(msg), 0, reinterpret_cast<sockaddr *>(&server_addr),
+           sizeof(server_addr));
 
     // 接收回显
-    char        buf[256];
+    char buf[256];
     sockaddr_in from{};
-    socklen_t   from_len = sizeof(from);
-    ssize_t     n        = recvfrom(fd, buf, sizeof(buf) - 1, 0,
-                                    reinterpret_cast<sockaddr *>(&from), &from_len);
+    socklen_t from_len = sizeof(from);
+    ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0,
+                         reinterpret_cast<sockaddr *>(&from), &from_len);
     if (n > 0) {
       buf[n] = '\0';
       cout << "  [UDP Client] 收到: \"" << buf << "\"\n";
@@ -915,11 +933,11 @@ void exercise10_simple_http() {
 
   // 1. 解析域名
   addrinfo hints{};
-  hints.ai_family   = AF_INET;
+  hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
 
   addrinfo *res = nullptr;
-  int       ret = getaddrinfo("example.com", "80", &hints, &res);
+  int ret = getaddrinfo("example.com", "80", &hints, &res);
   if (ret != 0) {
     cout << "  ⚠️ DNS 解析失败: " << gai_strerror(ret)
          << " (可能需要网络连接)\n";
@@ -929,13 +947,14 @@ void exercise10_simple_http() {
     // 启动一个简单的响应服务器
     std::thread fake_server([]() {
       int fd = socket(AF_INET, SOCK_STREAM, 0);
-      if (fd < 0) return;
+      if (fd < 0)
+        return;
       ScopedFd guard(fd);
       int optval = 1;
       setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
       sockaddr_in addr{};
-      addr.sin_family      = AF_INET;
-      addr.sin_port        = htons(12349);
+      addr.sin_family = AF_INET;
+      addr.sin_port = htons(12349);
       addr.sin_addr.s_addr = INADDR_ANY;
       (void)bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
       (void)listen(fd, 1);
@@ -945,12 +964,11 @@ void exercise10_simple_http() {
         char req[1024];
         recv(client, req, sizeof(req) - 1, 0);
         // 发送最小的 HTTP 响应
-        const char *resp =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 20\r\n"
-            "\r\n"
-            "Hello from C++ HTTP!\n";
+        const char *resp = "HTTP/1.1 200 OK\r\n"
+                           "Content-Type: text/plain\r\n"
+                           "Content-Length: 20\r\n"
+                           "\r\n"
+                           "Hello from C++ HTTP!\n";
         send(client, resp, strlen(resp), 0);
         close(client);
       }
@@ -963,16 +981,15 @@ void exercise10_simple_http() {
       ScopedFd guard2(fd2);
       sockaddr_in local{};
       local.sin_family = AF_INET;
-      local.sin_port   = htons(12349);
+      local.sin_port = htons(12349);
       inet_pton(AF_INET, "127.0.0.1", &local.sin_addr);
       (void)connect(fd2, reinterpret_cast<sockaddr *>(&local), sizeof(local));
 
       // 发送 HTTP 请求
-      const char *request =
-          "GET / HTTP/1.1\r\n"
-          "Host: localhost:12349\r\n"
-          "Connection: close\r\n"
-          "\r\n";
+      const char *request = "GET / HTTP/1.1\r\n"
+                            "Host: localhost:12349\r\n"
+                            "Connection: close\r\n"
+                            "\r\n";
       send(fd2, request, strlen(request), 0);
 
       // 接收响应
@@ -999,29 +1016,30 @@ void exercise10_simple_http() {
   cout << "  ✅ 已连接到 example.com:80\n";
 
   // 3. 发送 HTTP 请求
-  const char *request =
-      "GET / HTTP/1.1\r\n"
-      "Host: example.com\r\n"
-      "Connection: close\r\n"
-      "\r\n";
+  const char *request = "GET / HTTP/1.1\r\n"
+                        "Host: example.com\r\n"
+                        "Connection: close\r\n"
+                        "\r\n";
   send(fd, request, strlen(request), 0);
   cout << "  📤 已发送 HTTP GET 请求\n";
 
   // 4. 接收响应
-  char    response[8192];
+  char response[8192];
   ssize_t total = 0;
   ssize_t n;
-  while ((n = recv(fd, response + total, sizeof(response) - total - 1, 0)) > 0) {
+  while ((n = recv(fd, response + total, sizeof(response) - total - 1, 0)) >
+         0) {
     total += n;
-    if (total >= static_cast<ssize_t>(sizeof(response) - 1)) break;
+    if (total >= static_cast<ssize_t>(sizeof(response) - 1))
+      break;
   }
   response[total] = '\0';
 
   // 只打印前 500 字符
   string preview(response, std::min(total, static_cast<ssize_t>(500)));
-  cout << "  📩 收到 " << total << " 字节 (显示前 500):\n"
-       << preview << "\n";
-  if (total > 500) cout << "  ... (截断)\n";
+  cout << "  📩 收到 " << total << " 字节 (显示前 500):\n" << preview << "\n";
+  if (total > 500)
+    cout << "  ... (截断)\n";
 
   cout << "\n  💡 HTTP 协议本质:\n";
   cout << "    - HTTP 是在 TCP 连接上发送文本（或二进制）\n";
@@ -1056,8 +1074,7 @@ int main(int argc, char *argv[]) {
       run_udp_client();
       return 0;
     }
-    cout << "用法: " << argv[0]
-         << " [server|client|udp-server|udp-client]\n";
+    cout << "用法: " << argv[0] << " [server|client|udp-server|udp-client]\n";
     return 1;
   }
 
@@ -1078,11 +1095,13 @@ int main(int argc, char *argv[]) {
 
   cout << "\n✅ Week 11 全部练习完成！\n";
   cout << "\n📝 总结要点:\n";
-  cout << "  1. socket() 创建通信端点, AF_INET=IPv4, SOCK_STREAM=TCP, SOCK_DGRAM=UDP\n";
+  cout << "  1. socket() 创建通信端点, AF_INET=IPv4, SOCK_STREAM=TCP, "
+          "SOCK_DGRAM=UDP\n";
   cout << "  2. 服务器: socket → bind → listen → accept → recv/send → close\n";
   cout << "  3. 客户端: socket → connect → send/recv → close\n";
   cout << "  4. 网络字节序是大端, 必须用 htons/htonl/ntohs/ntohl 转换\n";
-  cout << "  5. setsockopt 控制套接字行为: SO_REUSEADDR(重启必备), TCP_NODELAY(低延迟)\n";
+  cout << "  5. setsockopt 控制套接字行为: SO_REUSEADDR(重启必备), "
+          "TCP_NODELAY(低延迟)\n";
   cout << "  6. getaddrinfo 是线程安全的地址解析函数, 替代 gethostbyname\n";
   cout << "  7. TCP 面向连接/可靠/字节流; UDP 无连接/不可靠/保留边界\n";
   cout << "  8. 非阻塞 I/O (O_NONBLOCK) 是多路复用(epoll)的基础\n";
