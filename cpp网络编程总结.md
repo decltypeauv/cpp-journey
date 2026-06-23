@@ -45,8 +45,52 @@
 
 ---
 
-## Week 12: TCP 深入 (待学习)
+## Week 12: TCP 深入 (2026-06-23) ✅
 
+### Nagle 算法
+- Nagle: 有未确认小包在途时，后续小包等待 → 减少小包数，但增加延迟
+- `TCP_NODELAY`: 禁用 Nagle → 每次 send 立即发出（低延迟场景必备）
+- `TCP_CORK`: Linux 特有，攒包直到取消 CORK → 比 Nagle 更可控
+- Nagle + Delayed ACK = 40ms "死锁" → 解决方案: TCP_NODELAY 或 writev
+
+### TCP KeepAlive
+- `TCP_KEEPIDLE`: 空闲多久后首次探测 (默认 7200s!)
+- `TCP_KEEPINTVL`: 探测间隔 (默认 75s)
+- `TCP_KEEPCNT`: 最大探测次数 (默认 9)
+- 应用层心跳 > 内核 KeepAlive: 更灵活, 可检测应用层健康状态, 不受中间设备干扰
+
+### 粘包/拆包 — TCP 字节流的消息边界
+- **粘包**: send("A") + send("B") → recv 收到 "AB" (合并)
+- **拆包**: send("Hello") → recv 收到 "Hel", 再 recv 收到 "lo" (拆分)
+- 根本原因: TCP 是字节流, 不保留应用层消息边界
+- 三种解决方案:
+
+| 方案 | 优点 | 缺点 | 适用 |
+|------|------|------|------|
+| 定长消息 | 简单 O(1) | 浪费带宽, 不灵活 | 固定格式数据 |
+| 分隔符 \\n | 人类可读 | 需转义, 逐字节低效 | HTTP, Redis |
+| 长度前缀 [4B len][data] | 二进制安全, 变长, O(1) | 需处理字节序 | gRPC, MySQL |
+
+### shutdown() vs close()
+- `close(fd)`: 减少引用计数, 计数到 0 才关闭双向; 受 dup/fork 影响
+- `shutdown(fd, SHUT_WR)`: 发 FIN 但仍可收数据 (半关闭)
+- `shutdown(fd, SHUT_RD)`: 丢弃接收缓冲, 再 recv 返回 0
+- 优雅关闭: shutdown(SHUT_WR) → 读到 FIN → close()
+
+### SO_LINGER
+- 默认(l_onoff=0): close 立即返回, 内核后台发剩余数据
+- 优雅等待(l_onoff=1, l_linger>0): close 阻塞最多 N 秒
+- 立即 RST(l_onoff=1, l_linger=0): 发 RST 跳过 TIME_WAIT → 危险, 不推荐
+
+### TCP 状态机
+- 11 种状态: CLOSED → LISTEN → SYN_RCVD → ESTABLISHED → ...
+- 三次握手: SYN → SYN+ACK → ACK
+- 四次挥手: FIN → ACK → FIN → ACK
+- **CLOSE_WAIT 堆积** = 服务端 bug (收到 FIN 未 close)
+- **TIME_WAIT** 正常 (2MSL≈60s), 不应强制消除
+
+---
+---
 ## Week 13: epoll / IO 多路复用 (待学习)
 
 ## Week 14: HTTP 协议 + 简易 HTTP Server (待学习)
