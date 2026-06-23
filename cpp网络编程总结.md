@@ -91,7 +91,47 @@
 
 ---
 ---
-## Week 13: epoll / IO 多路复用 (待学习)
+## Week 13: epoll / IO 多路复用 (2026-06-23) ✅
+
+### 演进路线
+- `select()`: fd_set, FD_SETSIZE=1024, O(n) 扫描, 每次拷贝
+- `poll()`: pollfd 数组, 无 fd 限制, events≠revents(可重用), 仍 O(n)
+- `epoll()`: Linux 专属, 红黑树+就绪链表, epoll_wait O(1) 只返回就绪 fd
+
+### epoll 核心 API
+- `epoll_create1(EPOLL_CLOEXEC)` — 创建 epoll 实例
+- `epoll_ctl(epfd, ADD/MOD/DEL, fd, &ev)` — 管理监控列表
+- `epoll_wait(epfd, events, maxevents, timeout)` — 等待事件 (LT/ET)
+- `epoll_data_t` 联合体: ptr(推荐), fd, u32, u64
+
+### LT vs ET (最核心的概念!)
+| | LT (默认) | ET (EPOLLET) |
+|---|---|---|
+| 通知 | 有数据就通知 | 状态变化时通知一次 |
+| 复杂度 | 低, 类似 poll | 高, 容易丢事件 |
+| 要求 | 不强制非阻塞 | **必须**非阻塞 + 读到 EAGAIN |
+
+### EPOLLONESHOT
+- 触发后自动暂停监控 → 同一 fd 不会被多个线程同时处理
+- 处理完后必须 `EPOLL_CTL_MOD` 重新注册
+
+### EPOLLRDHUP — ⚠️ 关键发现
+- **必须显式注册 `EPOLLRDHUP` 才能可靠检测对端关闭!**
+- 单靠 `EPOLLIN` + `recv=0` 在非阻塞 socket 上不可靠
+
+### timerfd + epoll
+- `timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC|TFD_NONBLOCK)`
+- `timerfd_settime(fd, 0, &itimerspec, nullptr)`
+- 定时器和 IO 事件统一处理 (一个事件循环)
+
+### 非阻塞 connect
+- `connect` → `EINPROGRESS` → `epoll(EPOLLOUT)` → `getsockopt(SO_ERROR)`
+- 用于并行连接、超时控制
+
+### 推荐架构
+```
+epoll(LT/ET) + 非阻塞 IO + EPOLLRDHUP + Connection* ptr + timerfd 心跳
+```
 
 ## Week 14: HTTP 协议 + 简易 HTTP Server (待学习)
 
