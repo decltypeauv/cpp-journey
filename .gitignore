@@ -12,3 +12,4 @@ build/
 # 系统文件
 .DS_Store
 Thumbs.db
+month05-source-reading/leveldb/
