@@ -1,0 +1,131 @@
+================================================================================
+        Month 5 源码学习总结 — 看透实现
+================================================================================
+
+学习路径: https://github.com/decltypeauv/cpp-journey
+学习日期: 2026-06-24
+
+Month 5 主题: 阅读经典 C++ 项目的源码，理解设计决策和实现技巧
+
+================================================================================
+Week 23: STL 实现深潜 — vector / string / function 内部
+================================================================================
+
+【核心哲学】「会用 STL 只是入门，看懂实现才是进阶」
+
+亲手实现 MiniVector / MiniString / MiniFunction，理解三大核心机制:
+  - std::vector  → RAII + placement new + 扩容策略
+  - std::string  → SSO (Small String Optimization) + CoW 历史
+  - std::function → Type Erasure (类型擦除) + SBO (Small Buffer Opt)
+
+【10 个练习】
+
+1. MiniVector — 动态数组的本质
+   - 三个指针: _begin, _end, _capacity_end
+   - push_back 用 placement new (不是 operator=)
+   - 扩容: size()==capacity() → 分配 2x, move 旧元素, 释放旧空间
+   - pop_back/clear 显式调用 ~T()
+   - operator new/delete (不是 new/delete) → 不调构造函数
+   - 实测: 元素 1-10, cap 从 4→8→16
+
+2. 扩容策略 — 1.5x vs 2x
+   - GCC: 2x 扩容因子
+   - 1.5x: 内存可复用 (旧块+新块≈连续, 可合并)
+   - 2x:   更快增长 (少 realloc), 但内存不可复用
+   - 摊还分析: N 次 push_back → ~3N 次操作 = 每次 O(1)
+   - 实测: 1.5x=3.0ms, 2x=5.3ms, std::vector=7.1ms, reserve=3.9ms
+   - 结论: 1.5x 增长 + reserve 是最优组合
+
+3. MiniString + SSO — 短字符串优化
+   - sizeof(MiniString) = 32 bytes (SSO buffer = 15 chars + null)
+   - 短模式: _data 指向 _local[16], 不分配堆
+   - 长模式: _data 指向堆, _capacity 记录容量
+   - is_sso(): _data == _local
+   - 实测: 'short' 1M allocations = 2ms (SSO, 无堆分配!)
+   - 实测: 'long'  1M allocations = 20ms (需堆分配)
+   - SSO 对短字符串: 10x faster!
+
+4. Copy-on-Write (CoW) — 为何被废弃
+   - C++98 时代: 多个 string 共享同一缓冲区 + 引用计数
+   - 写入时 detach: 如果 refcount > 1, 拷贝新缓冲区
+   - 废弃原因:
+     1. operator[](非const) 无法判断调用者是否会写入 → 过度拷贝
+     2. 多线程 refcount 需原子操作 → 成本 > 直接拷贝
+     3. SSO 对短字符串更有效 (完全无堆分配!)
+     4. C++11 move semantics 让拷贝成本大幅降低
+   - 实测: b=a → refcount=2 (共享); b[0]='h' → refcount=1 (detach)
+
+5. Arena Allocator — Bump Pointer 分配器
+   - 预分配大块内存, 线性分配 (仅移动指针)
+   - O(1) 分配 (仅一次指针加法 + 对齐检查)
+   - 无法单独 free, 只能整体 reset
+   - 实测: Arena 1.23ms vs std::allocator 2.63ms = 2.1x faster
+   - 适用场景: 游戏帧, 请求处理, 编译器, 任何短生命周期数据
+   - C++17 引入 std::pmr (Polymorphic Memory Resource) 标准化此模式
+
+6. Type Erasure — std::function 的内部机制
+   - MiniFunction<void(int)> 可以包装任何可调用对象
+   - 实现原理:
+     1. Concept (抽象基类): virtual void call(int)
+     2. Model<T> (模板子类): 持有 T, 实现 call() { obj(x); }
+     3. MiniFunction 持有 Concept*, 通过虚函数调用
+   - sizeof(MiniFunction) = 8 bytes (仅一个指针)
+   - sizeof(std::function) = 32 bytes (包含 SBO buffer!)
+   - std::function 对小对象做 SBO (内联存储, 无堆分配)
+
+7. Iterator Design — Tag Dispatch
+   - 5 种 iterator categories:
+     input → forward → bidirectional → random_access → contiguous (C++17)
+   - Tag dispatch: 根据 iterator::iterator_category 选择最优重载
+   - advance(it, n): random_access → it+=n (O(1)); 其他 → while(n--)++it (O(n))
+   - 零运行时开销 — 编译期模板元编程决定
+
+8. IntroSort 内部 — GCC 的 std::sort 实现
+   - Hybrid algorithm (混合算法):
+     Phase 1: QuickSort (median-of-3 pivot)
+     Phase 2: 递归深度 > 2*log2(N) → 切 HeapSort (防 O(n²))
+     Phase 3: 子数组 < 16 → InsertionSort (小数组更快)
+   - 实测: std::sort 随机 61ms, introsort 随机 74ms
+   - 实测: std::sort 已排序 8ms (检测到已排序? adaptive!)
+
+9. unordered_map 内部 — 哈希表
+   - Separate Chaining: vector<Bucket*> + 链表
+   - load_factor = size / bucket_count
+   - max_load_factor 默认 1.0 → 超过即 rehash (bucket 翻倍)
+   - rehash: 分配新 bucket array, 重新 hash 所有节点
+   - 实测: MiniUnorderedMap 59ms vs std::unordered_map 66ms (1M inserts)
+   - 真正的 std 实现: node-based 单链表 + bucket begin 数组
+
+10. Mini JSON Parser (集成)
+    - 集成 MiniVector (数组存储) + MiniFunction (visitor)
+    - 解析: ["hello", "world", 123, [1, 2, 3], "end"]
+    - 递归遍历 + visitor 模式输出树形结构
+    - 验证: 所有 Mini* 组件协同工作, 能构建真实应用
+
+================================================================================
+关键收获
+================================================================================
+
+1. 「placement new 是 vector 的核心」
+   - 分离内存分配 (operator new) 和对象构造 (placement new)
+   - 这样才能做到 capacity > size, 预分配未初始化的内存
+
+2. 「SSO 是 C++ 字符串最重要的优化」
+   - 绝大多数字符串 < 15 字符 → SSO 消除堆分配
+   - 这就是为什么不要害怕 std::string 的「拷贝开销」
+
+3. 「Type Erasure = 手工 vtable」
+   - Concept/Model 模式 = 编译期多态 (template) + 运行期多态 (virtual) 的桥接
+   - std::function, std::any, std::variant 都用此模式
+
+4. 「扩容因子影响内存布局」
+   - 2x: 更快增长, 但旧内存碎片不可复用
+   - 1.5x: 多 realloc 几次, 但内存可以合并复用
+   - 实际中 reserve() 比调扩容因子更重要
+
+5. 「源码是最佳文档」
+   - 看懂 STL 源码 → gdb step into std::vector 不再陌生
+   - 每个设计决策都有原因 (CoW 被废, SSO 胜出, 2x vs 1.5x)
+   - 深入理解 → 写出更高效的代码
+
+================================================================================
