@@ -1,0 +1,354 @@
+================================================================================
+        Month 4 学习总结 — 极致性能 (Beyond the Code)
+================================================================================
+
+学习路径: https://github.com/decltypeauv/cpp-journey
+学习日期: 2026-06-24
+
+Month 4 主题: 从代码到硬件 — 理解 CPU/内存/工具的底层工作原理
+
+================================================================================
+Week 17: CPU Cache & Memory Hierarchy
+================================================================================
+
+【核心洞察】「CPU 大部分时间不是在计算，而是在等待数据」
+  L1 cache ~0.5ns, L2 ~7ns, L3 ~30ns, RAM ~100ns
+  一次主存访问 ≈ 执行 200-400 条指令
+
+【10 个练习】
+
+1. Cache Hierarchy 测量
+   - 遍历不同大小数组 (8KB→64MB), 观察 per-access 延迟跳变
+   - 本机: 32KB→256KB (L1→L2) 延迟平稳 ~3ns, 4MB 附近跳到 ~10ns (L3)
+
+2. False Sharing
+   - 两线程自增无 padding 计数器: 490ms
+   - 两线程自增 alignas(64) 计数器: 243ms
+   - Speedup: 2x — cache line 乒乓效应
+
+3. AoS vs SoA
+   - X-only 遍历: SoA 比 AoS 快 9% (只读有效数据)
+   - XYZ 全遍历: AoS 比 SoA 快 4% (字段局部性)
+   - 选择标准: 访问子集 → SoA; 访问全字段 → AoS
+
+4. Loop Interchange
+   - Row-Major (i→j): 45ms
+   - Column-Major (j→i): 262ms
+   - 差异: 5.8x — spatial locality 的重要性
+
+5. Branch Prediction
+   - Unsorted + Branch: 1228ms (预测准确率 ~50%)
+   - Sorted + Branch:   498ms  (预测准确率 ~100%)
+   - Branchless:        1176ms (消除分支, 但编译器 cmov 已很好)
+   - 差异: 2.5x
+
+6. Cache Prefetch
+   - __builtin_prefetch(addr, 0, 3) — 软件预取
+   - 硬件 prefetcher 对顺序访问已很强, 软件 prefetch 对随机访问更有价值
+   - Prefetch distance 需匹配 访存延迟/节点处理时间
+
+7. Memory Alignment
+   - alignas(64) 对齐到 cache line 边界
+   - std::hardware_destructive_interference_size = 64 (避免 false sharing)
+   - std::hardware_constructive_interference_size = 64 (提升 true sharing)
+   - 现代 CPU 对 unaligned access 容忍度高, 但跨 cache line 仍有惩罚
+
+8. Data-Oriented Design (ECS)
+   - ECS Movement (100 frames, 100K entities): 900 us/frame
+   - OOP Movement (100 frames, 100K heap objects): 1774 us/frame
+   - Speedup: 2x — 连续内存 vs 指针追逐
+
+9. Matrix Multiply 优化
+   - Naive (三重循环):       45045 ms
+   - Tiled (手动分块 64×64): 10038 ms  (4.5x)
+   - Recursive (cache-oblivious): 4113 ms  (11x!)
+   - 最佳 TILE size 测试: 128-256
+
+10. Market Data Pipeline (综合实战)
+    - V1 (unordered_map): 88ms — 简单直接, 1M records/5K symbols
+    - V2 (sort+SoA):      433ms — sort overhead 在此规模不划算
+    - 教训: 优化必须测量! 复杂不等于快
+
+================================================================================
+Week 18: perf & Profiling — 测量驱动优化
+================================================================================
+
+【核心哲学】「没有测量就没有优化」
+
+【10 个练习】
+
+1. perf stat — 硬件计数器
+   - cycles, instructions, IPC, cache-misses, branch-misses
+   - IPC < 1.0 → memory-bound, IPC > 2.0 → compute-bound
+   - Sequential: HIGH IPC, LOW cache-misses
+   - Random:    LOW IPC,  HIGH cache-misses
+   - Compute:   HIGH IPC, ~0 cache-misses
+
+2. perf record + perf report
+   - 采样频率 (默认 4000Hz) → perf.data → 热点分析
+   - -g 记录调用栈, --stdio 文本输出
+   - 多级调用栈: slow_op 占 90%
+
+3. perf top + perf trace
+   - perf top:    实时热点函数 (像 top 但显示 CPU 采样)
+   - perf trace:  系统调用追踪 (类似 strace 但有时间戳)
+   - perf stat -I 1000: 每秒输出性能计数器
+
+4. Flame Graphs (火焰图)
+   - Brendan Gregg 发明的可视化工具
+   - X轴=按字母排序, Y轴=调用栈深度, 宽度=CPU时间
+   - 生成: perf record → perf script → stackcollapse → flamegraph.pl
+   - 新内核: perf report --flamegraph (内置!)
+
+5. Micro-Benchmarking 框架
+   - 关键要素: 预热(warmup) + 多轮(>10) + 统计(min/avg/median/stddev)
+   - std::string::substr vs string_view: 后者无内存分配
+   - unordered_map vs std::map: 顺序查找快 4.8x, 随机查找快 3.4x
+   - Indexed for 是最快的循环方式 (编译器最好优化)
+
+6. Custom Profiler
+   - RAII ScopeProfiler + 单例统计
+   - 开销 ~100ns/call — 不适合 ns 级函数
+   - 优势: 与业务逻辑关联, 可上报监控系统
+   - perf 仍然是零开销采样的正解
+
+7. Complexity Benchmarking
+   - vector::reserve vs no-reserve: 1M 元素 → 1.5x (避免 realloc)
+   - vector 遍历 vs list 遍历: 6.5x (连续内存 vs 指针追逐)
+   - std::sort vs std::stable_sort: 性能相近 (<10% 差异)
+
+8. Cache Miss Attribution
+   - perf mem record: 记录每次内存访问延迟 (L1/L2/L3/RAM)
+   - Tiled matmul vs Naive matmul: 1.5x (512×512)
+   - perf report --sort=mem,sym: 按函数看内存延迟分布
+
+9. Profile ffind
+   - IPC < 1.0 + cache-misses 高 → Boyer-Moore/mmap
+   - context-switches 多 → 减少线程数
+   - branch-misses 高 → RE2/hyperscan 无回溯正则引擎
+   - 大量 syscall → batch stat/getdents
+
+10. Word Count 优化 (综合实战)
+    - V1 (逐字节 ifstream): 691ms, 10MB 文件
+    - V2 (全文读入+reserve+指针扫描): 401ms
+    - Speedup: 1.72x
+    - 进一步: mmap/多线程/SIMD/flat_hash_map
+
+================================================================================
+Week 19: gdb 深度调试 — 程序的可观测性
+================================================================================
+
+【核心哲学】「调试是比写代码更重要的技能」
+
+【10 个练习】
+
+1. Advanced Breakpoints
+   - 条件断点: b func if var < 0 (只在bug触发时停)
+   - 临时断点: tbreak (只停一次)
+   - 命令列表: commands → silent → bt → continue → end
+   - 跳过次数: ignore 1 346 (跳过前346次)
+   - 经典场景: 「循环到第500次才出bug」→ 条件断点
+
+2. Watchpoints
+   - watch var: CPU 硬件断点 (DR0-DR3 寄存器), 变量被写时触发
+   - rwatch var: 读监视点
+   - awatch var: 读写监视点
+   - 限制: 硬件watchpoint 只有4个; 软件watchpoint 无限制但极慢
+   - 经典场景: 「不知道谁改了这个变量, watchpoint抓住他!」
+   - Demo: buffer overflow 覆盖全局变量 timeout_ms
+
+3. Catchpoints
+   - catch throw:  异常抛出时停止 (调用栈完整!)
+   - catch catch:  异常被捕获时停止
+   - catch syscall write:  特定系统调用时停止
+   - catch fork/exec: 进程创建时停止
+   - catch signal SIGSEGV: 收到信号时停止
+
+4. Core Dump 分析
+   - ulimit -c unlimited → 启用 core dump
+   - gdb <binary> <core> → 加载崩溃快照
+   - bt / bt full: 完整调用栈 + 局部变量
+   - info registers: CPU 寄存器状态
+   - frame N: 切换到任意栈帧
+   - thread apply all bt: 所有线程调用栈
+   - Demo: use-after-free + stack buffer overflow
+
+5. Multi-threaded Debugging
+   - info threads: 列出所有线程
+   - thread N: 切换线程
+   - thread apply all bt: 所有线程 backtrace
+   - set scheduler-locking on/step/off: 控制线程调度
+   - deadlock 检测: thread apply all bt → 找 lock_wait 调用
+   - Demo: 死锁 (mutex 顺序不一致)
+
+6. Reverse Debugging (rr)
+   - Mozilla 的 Record & Replay 调试器
+   - rr record ./prog → 录制
+   - rr replay → 重放 (完整 gdb 功能 + 反向)
+   - reverse-continue/step/next/finish: 时间倒流!
+   - heisenbug 杀手: 录制100次, 选失败的来重放
+   - --chaos 模式: 随机化线程调度
+
+7. gdb Python Scripting
+   - Python API: gdb.execute(), gdb.Breakpoint(), gdb.selected_frame()
+   - 自定义命令: warden (checkpoint), leak-check, deadlock-check
+   - Pretty printers: Vec3Printer, BoundingBoxPrinter
+   - 自动化: bp.condition + bp.commands = 条件触发自动 bt
+
+8. Dynamic Instrumentation
+   - dprintf: 动态 printf (不停止程序!)
+   - compile code: 现场编译注入 C 代码
+   - set var: 修改运行中的变量
+   - call (void)printf(...): 直接调用函数
+   - 经典场景: 生产环境不能重新编译 → dprintf 加日志
+
+9. Memory Debugging
+   - ASan (-fsanitize=address): heap/stack/global overflow + use-after-free
+   - Valgrind: 内存泄漏 + 未初始化读取
+   - gdb 内存命令: x/Nx addr, info proc mappings, find /b
+   - Demo: heap overflow, use-after-return, double-free
+
+10. Bug Hunt (综合实战)
+    - 银行系统 5 个 bug:
+      1. 未初始化余额 (Account ctor 未设 balance)
+      2. 竞态条件 (deposit 无锁 → TOCTOU)
+      3. 死锁风险 (两个 mutex 顺序不一致)
+      4. 整数溢出 (balance += amount 未检查上溢)
+      5. use-after-close (close_account 后仍可访问)
+    - 竞态实际触发: Eve 余额 997 ≠ 预期 2000
+
+================================================================================
+Week 20: Sanitizers & UB Detection — 让 bug 无所遁形
+================================================================================
+
+【核心哲学】「CI 不集成 sanitizer = 裸奔上高速」
+
+Sanitizer 是编译器内置的运行时检测工具 (Google):
+  ASan:  每次内存访问在影子内存中检查合法性 (2x 慢)
+  UBSan: 在可疑操作前后插入检查代码 (minimal overhead)
+  TSan:  记录每次内存访问的 happens-before 关系 (5-15x 慢)
+  MSan:  追踪每个 bit 的初始化状态 (Clang only, 2-3x 慢)
+  LSan:  扫描可达内存找出不可达分配 (ASan 自带)
+
+【ASan — AddressSanitizer】
+
+1. Heap Buffer Overflow (堆越界)
+   - ASan 为每次分配添加 redzone (前后不可访问区域)
+   - 影子内存: 每 8B 应用内存 → 1B 描述可访问性
+   - report: 精确到源码行 + allocation stack + violation stack
+   - Demo: arr[10]=42 on new int[10] → heap-buffer-overflow caught!
+
+2. Stack & Global Overflow
+   - 栈变量之间有 redzone 间隔
+   - strcpy(16B buf, 20B str) → stack-buffer-overflow
+   - 全局数组越界覆盖相邻变量
+
+3. Use-After-Free / Double-Free
+   - ASan 不放内存回 allocator → 放入 quarantine zone
+   - delete后访问 → use-after-free (WRITE/READ)立刻报告
+   - 显示: where freed + where allocated + where used
+   - 栈返回局部变量地址 → 需 ASAN_OPTIONS=detect_stack_use_after_return=1
+
+【UBSan — UndefinedBehaviorSanitizer】
+
+4. 整数溢出
+   - 有符号溢出是最危险的 UB: 测试通过, -O3 优化后行为改变
+   - signed-integer-overflow: INT_MAX+100, 100000*100000
+   - division-by-zero: 100/0 → SIGFPE
+   - shift-out-of-range: 1<<31 on signed int → overflow
+   - negation overflow: -INT_MIN 无法表示
+
+5. 指针/对齐/类型转换
+   - null pointer dereference
+   - misaligned access (x86 容忍但慢, ARM 崩溃)
+   - invalid downcast (static_cast<Derived*>(base_ptr_that_isnt_derived))
+   - invalid bool value (byte not 0 or 1)
+
+6. 更多 UBSan 检测
+   - enum range: 赋非法值给 enum
+   - array bounds: index 越界 (-fsanitize=bounds)
+   - vptr corruption: memset覆盖vtable指针
+   - unreachable: reached unreachable code
+
+【TSan — ThreadSanitizer】
+
+7. Data Race 检测
+   - 两个线程同时访问同一内存, 至少一个写, 无 happens-before
+   - plain g_counter++ from 2 threads → race (lost updates: 200000 expected, got less)
+   - vector::push_back from 2 threads → race (可能崩溃!)
+   - double-checked locking without atomic → false!
+
+【MSan — MemorySanitizer】 (Clang only)
+
+8. 未初始化内存
+   - 追踪每个bit初始化状态: 0=未初始化, 1=已初始化
+   - stack: int x; if (x == 0) ...
+   - heap: new int (not new int())
+   - partial struct: Point{p.x=10,p.y=20} → p.z unread
+   - array: half initialized
+
+【LSan — LeakSanitizer】
+
+9. 内存泄漏检测
+   - ASan 退出时自动运行 LSan
+   - direct leak: new没有delete
+   - cycle leak: shared_ptr循环引用 (用weak_ptr打破)
+   - exception leak: 异常抛过后资源未释放 (用RAII!)
+
+【综合 — JSON Parser Bug Hunt】
+
+10. 9个bug的JSON Parser, 三种sanitizer各发现不同bug:
+    - ASan:  buffer overflow + use-after-return
+    - UBSan: uninitialized member read
+    - TSan:  cache race (mutable without mutex)
+    - LSan:  leaked children
+
+【关键收获】
+  □ ASan 是 CI 必选项 — heap/stack/global bugs 一网打尽
+  □ UBSan 捕获「测试通过但生产崩溃」的 UB — 编译时用 -fsanitize=undefined
+  □ TSan 是唯一可靠检测 data race 的工具 — 不能和 ASan 同时使用
+  □ MSan 需 Clang + 整个依赖链都用 MSan 编译 — 最苛刻但最强大
+  □ Sanitizer 组合: ASan+UBSan (CI), TSan (test suite), LSan (ASan自带)
+
+================================================================================
+即将到来的 Week 21-22
+================================================================================
+
+Week 21: io_uring
+  - SQ/CQ 环形队列 (Submission Queue / Completion Queue)
+  - 固定文件/缓冲区注册 (registered files/buffers)
+  - io_uring vs epoll 性能对比 (batch submission, no syscall per IO)
+  - 异步文件 I/O (真正的 async disk IO, 不是线程池模拟)
+
+Week 22: Month 4 收官
+  - 回顾 + 性能基准测试
+  - 用所有技术优化 ffind
+  - Capstone: 高性能异步 HTTP 服务器
+
+================================================================================
+关键技术选型参考
+================================================================================
+
+【性能优化清单 (按优先级)】
+□ 1. 选择正确的算法和数据结构 (O(n²)→O(n log n) 比所有 micro-optimization 都重要)
+□ 2. 测量! (perf stat/record, benchmark framework)
+□ 3. 数据布局优化 (AoS→SoA, alignas, padding 消除 false sharing)
+□ 4. 利用 cache (loop interchange, tiling, prefetch)
+□ 5. 减少分支 (branchless, 排序数据, __builtin_expect)
+□ 6. 减少内存分配 (reserve, object pool, arena allocator)
+□ 7. SIMD/向量化 (编译器自动向量化 + 手动 SSE/AVX)
+□ 8. 多线程 (注意 false sharing, 竞态条件)
+□ 9. io_uring (替代 epoll+thread pool for async IO)
+□ 10. 编译器优化 (-O2/-O3, LTO, PGO)
+
+【调试清单】
+□ 1. -g -O0 编译 (保留调试符号, 禁用优化)
+□ 2. 条件断点定位到精确触发场景
+□ 3. watchpoint 找到变量被谁修改
+□ 4. catch throw 获得异常抛出时的完整调用栈
+□ 5. core dump 分析崩溃现场 (bt full + registers)
+□ 6. rr 录制+重放 解决 heisenbug
+□ 7. dprintf 动态日志 (生产环境可用)
+□ 8. ASan/UBSan/TSan 编译检查 (CI 集成)
+
+================================================================================
