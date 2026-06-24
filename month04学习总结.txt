@@ -311,19 +311,159 @@ Sanitizer 是编译器内置的运行时检测工具 (Google):
   □ Sanitizer 组合: ASan+UBSan (CI), TSan (test suite), LSan (ASan自带)
 
 ================================================================================
-即将到来的 Week 21-22
+Week 21: io_uring — Linux 异步 I/O 的未来
 ================================================================================
 
-Week 21: io_uring
-  - SQ/CQ 环形队列 (Submission Queue / Completion Queue)
-  - 固定文件/缓冲区注册 (registered files/buffers)
-  - io_uring vs epoll 性能对比 (batch submission, no syscall per IO)
-  - 异步文件 I/O (真正的 async disk IO, 不是线程池模拟)
+【核心哲学】「io_uring 统一了文件+网络 I/O 的异步模型」
 
-Week 22: Month 4 收官
-  - 回顾 + 性能基准测试
-  - 用所有技术优化 ffind
-  - Capstone: 高性能异步 HTTP 服务器
+io_uring 解决了传统异步 I/O 的三大痛点:
+  1. 文件 I/O 终于可以真正异步 (不需要 O_DIRECT, 不需要线程池)
+  2. 网络+磁盘统一事件循环 (一个 ring 处理所有 I/O)
+  3. 批量提交 (一次 syscall 提交 N 个 I/O, 一次收割 N 个完成)
+
+【架构: 双环形队列】
+  用户态: SQ (Submission Queue) — 我们写入 SQE
+  内核态: CQ (Completion Queue) — 内核写入 CQE
+  共享内存: mmap 映射, 零拷贝, 无 syscall 读写
+
+【～170 行 Minimal IoUring Wrapper (无 liburing 依赖)】
+  - io_uring_setup / io_uring_enter raw syscall
+  - SQ/CQ ring mmap + acquire/release 内存顺序
+  - prep_read/write/accept helpers
+
+【10 个练习】
+
+1. Basic async read
+   - io_uring 异步读 96 字节: 15.7us
+   - 传统 read: 26.2us
+   - 意义: 文件 I/O 不再阻塞!
+
+2. Batch submission
+   - 4 个文件读取 → 1 次 io_uring_enter → 20us total
+   - vs 4 次 read() syscall
+   - 批量 = 减少 syscall 开销
+
+3. Socket accept
+   - IORING_OP_ACCEPT: 异步接受连接
+   - 同一个 ring 处理文件+网络 I/O
+
+4. Non-blocking event loop
+   - submit(wait_nr=0) 不阻塞
+   - 像 epoll 一样驱动事件循环
+
+5. Fixed files / Registered buffers
+   - IORING_REGISTER_FILES: 预注册 fd, SQE 用索引代替 fd
+   - IORING_REGISTER_BUFFERS: 预固定内存
+   - 减少 per-IO 内核开销 (~30%)
+
+6. Linked operations + Timeouts
+   - IOSQE_IO_LINK: read → write 链
+   - IORING_OP_TIMEOUT: 超时保护
+
+7. io_uring vs epoll 对比
+   特性对比表, 适用场景分析
+
+8. Multi-shot accept
+   - 提交 1 次 ACCEPT → 每个新连接自动产生 CQE
+   - epoll 做不到的特性
+
+9. Echo Server
+   - 完整事件循环: accept → read → write → read
+   - 单线程 + io_uring
+
+10. HTTP File Server 架构设计
+    - 单线程异步, 所有 I/O 统一 ring
+    - 参考: ScyllaDB 4M IOPS/核, RocksDB 30%+ 改进
+
+================================================================================
+Week 22: Month 4 收官 — Capstone
+================================================================================
+
+【核心成果】Async Log Server 架构: io_uring + SPSC ring buffer + batch write
+
+【Part A: 回顾与反思 (Ex1-5)】
+
+1. 18 题核心概念自检
+   - 覆盖 W17-21 所有关键概念 (答对 15+/18 = 扎实)
+
+2. 6 Tier 性能优化检查表
+   - Tier 1: 算法与数据结构 (影响最大)
+   - Tier 2: 测量 (perf stat/record, 火焰图)
+   - Tier 3: 数据布局 (AoS→SoA, false sharing, alignment)
+   - Tier 4: 分支优化 (sort, branchless, LUT)
+   - Tier 5: 并发与 I/O (线程数, 锁粒度, io_uring)
+   - Tier 6: 工具验证 (ASan/UBSan/TSan clean)
+
+3. 10 场景技术选型决策树
+   - "程序慢不知道瓶颈在哪" → perf
+   - "IPC<0.5 cache-misses高" → 数据布局
+   - "偶尔崩溃,gdb下不崩" → rr
+   - "文件I/O密集,线程池CPU高" → io_uring
+
+4. ffind 优化方案
+   - A. IPC低+cache-miss高 → mmap+Boyer-Moore
+   - B. branch-miss高 → RE2/Hyperscan
+   - C. context-switch多 → thread pool/hardware_concurrency
+   - D. syscall密集 → io_uring batch
+
+5. Benchmark 实战
+   - Unsorted+branchy: 45ms
+   - Sorted+branchy:   17ms (2.6x)
+   - LUT (branchless): 6.7ms (6.7x!)
+   - 结论: LUT 消除分支是最优方案
+
+【Part B: Capstone — Async Log Server (Ex6-10)】
+
+6. SPSC Ring Buffer
+   - lock-free (atomic + memory order)
+   - cache-line padded (alignas(64))
+   - 21.9M ops/sec throughput!
+
+7. LogEntry 设计
+   - sizeof = 64 bytes (exactly 1 cache line)
+   - Fixed-size → predictable memory footprint
+   - Timestamp + level + pid + message[48]
+
+8. Disk Writer
+   - Batch write: 100 lines per write
+   - 100K lines in 35ms (100 writes vs 100K without batching)
+   - 1000x syscall reduction!
+
+9. Full Integration Architecture
+   - io_uring accept/read → SPSC ring → batch write → disk
+   - Conceptual throughput: ~4.9M lines/sec
+   - Single-thread, event-driven, no thread pool
+
+10. Month 4 反思 & Month 5 路线图
+    - 能力宣言: 「我理解硬件，让C++代码跑得最快」
+    - Month 5: 源码阅读 (STL/leveldb/fmt/libevent)
+    - Month 6: 综合项目
+
+================================================================================
+Month 4 完成统计
+================================================================================
+
+6 周, 60 个练习, ~7000 行 scaffold 代码
+
+5 个实战项目:
+  - Cache Performance Benchmark (W17)
+  - Micro-Benchmarking Framework (W18)
+  - Bank System Bug Hunt (W19)
+  - io_uring Echo Server (W21)
+  - Async Log Server Capstone (W22)
+
+掌握工具:
+  - perf (stat/record/report/top/trace/mem)
+  - gdb (breakpoint/watchpoint/catchpoint/core/rr)
+  - Sanitizers (ASan/UBSan/TSan/MSan/LSan)
+  - io_uring (raw syscall + mmap wrapper)
+  - FlameGraph, Custom Profiler, Micro-benchmark harness
+
+核心能力:
+  - 「测量驱动优化」: profile → hotspot → optimize → verify
+  - 「系统化调试」: 不用 printf, 用 gdb/rr/sanitizer
+  - 「硬件意识」: cache line, branch prediction, memory ordering
+  - 「工具链集成」: CMake + CI sanitizer + gdb scripts
 
 ================================================================================
 关键技术选型参考
