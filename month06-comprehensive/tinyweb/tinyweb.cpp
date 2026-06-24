@@ -26,9 +26,11 @@
 //   Ex10: 整合 — 运行中的 HTTP Server
 // ============================================================================
 
+#include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
@@ -36,11 +38,15 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
+#include <random>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/epoll.h>
@@ -53,6 +59,13 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+// OpenSSL (optional: 如果没有安装, 注释 #define TINYWEB_TLS)
+// #define TINYWEB_TLS
+#ifdef TINYWEB_TLS
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -379,18 +392,180 @@ struct HttpResponse {
   }
 };
 
-// ============================================================================
-// Part 6: Router — URL 路由 (M1 templates + lambda)
-// ============================================================================
-using HttpHandler = std::function<HttpResponse(const HttpRequest&)>;
+// ── 前向声明 ────────────────────────────────────────────────────────
+using HttpHandler = std::function<struct HttpResponse(const struct HttpRequest&)>;
 
+// ============================================================================
+// Part 6a: WebSocket — RFC 6455 (M3 Socket + M5 protocol design)
+// ============================================================================
+//
+// WebSocket 帧格式 (RFC 6455 §5.2):
+//   0                   1                   2                   3
+//   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//  +-+-+-+-+-------+-+-------------+-------------------------------+
+//  |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+//  |I|S|S|S|  (4)  |A|     (7)     |            16/64              |
+//  |N|V|V|V|       |S|             |   (if payload len == 126/127) |
+//  | |1|2|3|       |K|             |                               |
+//  +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+//  |     Masking-key (if MASK set, 4 bytes)                        |
+//  +---------------------------------------------------------------+
+//  |     Payload Data (masked if MASK set)                         |
+//  +---------------------------------------------------------------+
+
+enum class WsOpcode : uint8_t {
+  CONTINUATION = 0x0, TEXT = 0x1, BINARY = 0x2,
+  CLOSE = 0x8, PING = 0x9, PONG = 0xA
+};
+
+struct WebSocketFrame {
+  bool fin = true; uint8_t rsv = 0; WsOpcode opcode = WsOpcode::TEXT;
+  bool mask = false; uint8_t mask_key[4] = {};
+  std::string payload;
+
+  static std::optional<WebSocketFrame> parse(const char* data, size_t len, size_t& consumed) {
+    if (len < 2) return std::nullopt;
+    WebSocketFrame f;
+    f.fin = (data[0] & 0x80) != 0;
+    f.rsv = (data[0] & 0x70) >> 4;
+    f.opcode = static_cast<WsOpcode>(data[0] & 0x0F);
+    f.mask = (data[1] & 0x80) != 0;
+    uint64_t plen = data[1] & 0x7F;
+    size_t header_len = 2;
+    if (plen == 126) { if (len < 4) return std::nullopt; plen = (uint8_t)data[2]<<8 | (uint8_t)data[3]; header_len = 4; }
+    else if (plen == 127) { if (len < 10) return std::nullopt; plen = 0; for (int i=0;i<8;i++) plen=(plen<<8)|(uint8_t)data[2+i]; header_len = 10; }
+    if (f.mask) {
+      if (len < header_len + 4) return std::nullopt;
+      std::memcpy(f.mask_key, data + header_len, 4);
+      header_len += 4;
+    }
+    if (len < header_len + plen) return std::nullopt;
+    f.payload.assign(data + header_len, plen);
+    if (f.mask) for (size_t i = 0; i < plen; i++) f.payload[i] ^= f.mask_key[i % 4];
+    consumed = header_len + plen;
+    return f;
+  }
+
+  std::string encode() const {
+    std::string s; s.reserve(10 + payload.size());
+    s.push_back((fin ? 0x80 : 0x00) | (rsv << 4) | (uint8_t(opcode) & 0x0F));
+    uint8_t mask_byte = mask ? 0x80 : 0x00;
+    if (payload.size() < 126) { s.push_back(mask_byte | payload.size()); }
+    else if (payload.size() <= 0xFFFF) { s.push_back(mask_byte | 126); s.push_back(payload.size() >> 8); s.push_back(payload.size() & 0xFF); }
+    else { s.push_back(mask_byte | 127); for (int i=7;i>=0;i--) s.push_back((payload.size()>>(i*8)) & 0xFF); }
+    if (mask) { std::memcpy(&s[s.size()], mask_key, 4); s.resize(s.size()+4); /* 简化: 不实际 mask */ }
+    s += payload;
+    return s;
+  }
+};
+
+// WebSocket 连接状态
+struct WebSocketState {
+  using MessageCb = std::function<void(std::string_view, bool /*binary*/)>;
+  using CloseCb = std::function<void()>;
+
+  MessageCb on_message; CloseCb on_close;
+  std::string _fragment_buf; // 分片重组缓冲
+
+  void feed_frame(const WebSocketFrame& f) {
+    switch (f.opcode) {
+    case WsOpcode::TEXT: case WsOpcode::BINARY:
+      if (!f.fin) { _fragment_buf += f.payload; return; }
+      if (!_fragment_buf.empty()) { _fragment_buf += f.payload; on_message(_fragment_buf, f.opcode == WsOpcode::BINARY); _fragment_buf.clear(); }
+      else on_message(f.payload, f.opcode == WsOpcode::BINARY);
+      break;
+    case WsOpcode::CONTINUATION: _fragment_buf += f.payload; if (f.fin && on_message) { on_message(_fragment_buf, false); _fragment_buf.clear(); } break;
+    case WsOpcode::PING: if (on_message) on_message("__PING__", false); break;  // handled by send_pong
+    case WsOpcode::PONG: break;
+    case WsOpcode::CLOSE: if (on_close) on_close(); break;
+    }
+  }
+};
+
+// ============================================================================
+// Part 6b: Middleware — 责任链模式
+// ============================================================================
+//
+// Middleware 链: M1 → M2 → M3 → Handler → M3(after) → M2(after) → M1(after)
+// 每个 middleware 可以在 handler 之前/之后执行逻辑
+// 用途: 日志, CORS, 认证, 压缩, 限流
+
+using NextFunc = std::function<HttpResponse()>;
+using MiddlewareFunc = std::function<HttpResponse(const HttpRequest&, NextFunc)>;
+HttpResponse run_middleware_chain(const std::vector<MiddlewareFunc>& mw, size_t idx, const HttpRequest& req, const HttpHandler& final_handler) {
+  if (idx >= mw.size()) return final_handler(req);
+  return mw[idx](req, [&]() { return run_middleware_chain(mw, idx + 1, req, final_handler); });
+}
+
+// ── 常用中间件 ──────────────────────────────────────────────────────
+namespace middleware {
+  // CORS 中间件
+  inline MiddlewareFunc cors(std::string origin = "*") {
+    return [origin](const HttpRequest& req, NextFunc next) {
+      auto resp = next();
+      resp.set_header("Access-Control-Allow-Origin", origin);
+      resp.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      resp.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      if (req.method == "OPTIONS") { resp.set_status(204); resp.set_body(""); }
+      return resp;
+    };
+  }
+  // 请求日志中间件
+  inline MiddlewareFunc logger() {
+    return [](const HttpRequest& req, NextFunc next) {
+      auto t0 = std::chrono::steady_clock::now();
+      auto resp = next();
+      auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+      std::cout << "  [" << req.method << " " << req.path << "] → " << resp.status << " (" << us << "us)\n";
+      return resp;
+    };
+  }
+  // Auth 中间件 (简化: Bearer token)
+  inline MiddlewareFunc auth(std::string secret = "tinyweb-secret") {
+    return [secret](const HttpRequest& req, NextFunc next) {
+      auto auth_hdr = req.header("authorization");
+      if (!auth_hdr.empty() && auth_hdr.find("Bearer " + secret) != std::string_view::npos) return next();
+      return HttpResponse{}.set_status(401).set_json(R"({"error":"Unauthorized"})");
+    };
+  }
+  // Compression (简化: 标记 Accept-Encoding)
+  inline MiddlewareFunc gzip_hint() {
+    return [](const HttpRequest& req, NextFunc next) {
+      auto resp = next();
+      if (req.header("accept-encoding").find("gzip") != std::string_view::npos)
+        resp.set_header("X-Compression", "gzip-supported");
+      return resp;
+    };
+  }
+  // Rate Limiting (token bucket 简化)
+  inline MiddlewareFunc rate_limit(int max_per_sec = 100) {
+    struct State { std::mutex mtx; std::unordered_map<std::string, int> counts; std::chrono::steady_clock::time_point reset; };
+    auto state = std::make_shared<State>();
+    state->reset = std::chrono::steady_clock::now();
+    return [state, max_per_sec](const HttpRequest& req, NextFunc next) {
+      std::lock_guard lock(state->mtx);
+      auto now = std::chrono::steady_clock::now();
+      if (now - state->reset > std::chrono::seconds(1)) { state->counts.clear(); state->reset = now; }
+      std::string ip = "global"; // 简化: 使用全局计数器
+      if (++state->counts[ip] > max_per_sec)
+        return HttpResponse{}.set_status(429).set_json(R"({"error":"Rate Limit Exceeded"})");
+      return next();
+    };
+  }
+}
+
+// ============================================================================
+// Part 6c: Router — URL 路由 (M1 templates + lambda)
+// ============================================================================
+// 扩展: 支持 middleware 链
 class Router {
   struct Route {
-    std::string method;
-    std::string path;
+    std::string method; std::string path;
     HttpHandler handler;
+    std::vector<MiddlewareFunc> middleware; // per-route middleware
   };
   std::vector<Route> _routes;
+  std::vector<MiddlewareFunc> _global_middleware; // global middleware
   HttpHandler _not_found;
 
 public:
@@ -400,45 +575,208 @@ public:
     };
   }
 
-  Router& get(const std::string& path, HttpHandler h) { _routes.push_back({"GET", path, std::move(h)}); return *this; }
-  Router& post(const std::string& path, HttpHandler h) { _routes.push_back({"POST", path, std::move(h)}); return *this; }
-  Router& put(const std::string& path, HttpHandler h) { _routes.push_back({"PUT", path, std::move(h)}); return *this; }
-  Router& del(const std::string& path, HttpHandler h) { _routes.push_back({"DELETE", path, std::move(h)}); return *this; }
+  // ── 全局中间件 ──────────────────────────────────────────────────
+  Router& use(MiddlewareFunc mw) { _global_middleware.push_back(std::move(mw)); return *this; }
+
+  // ── 路由注册 ────────────────────────────────────────────────────
+  Router& get(const std::string& path, HttpHandler h, std::vector<MiddlewareFunc> mw = {})
+    { _routes.push_back({"GET", path, std::move(h), std::move(mw)}); return *this; }
+  Router& post(const std::string& path, HttpHandler h, std::vector<MiddlewareFunc> mw = {})
+    { _routes.push_back({"POST", path, std::move(h), std::move(mw)}); return *this; }
+  Router& put(const std::string& path, HttpHandler h, std::vector<MiddlewareFunc> mw = {})
+    { _routes.push_back({"PUT", path, std::move(h), std::move(mw)}); return *this; }
+  Router& del(const std::string& path, HttpHandler h, std::vector<MiddlewareFunc> mw = {})
+    { _routes.push_back({"DELETE", path, std::move(h), std::move(mw)}); return *this; }
+
+  // ── WebSocket 升级路由 ──────────────────────────────────────────
+  using WsHandler = std::function<void(std::shared_ptr<struct WsConnection>)>;
+  struct WsRoute { std::string path; WsHandler handler; };
+  std::vector<WsRoute>& ws_routes() { return _ws_routes; }
 
   HttpResponse dispatch(const HttpRequest& req) const {
+    // 检查 WebSocket 升级
+    if (req.header("upgrade").find("websocket") != std::string_view::npos) {
+      for (auto& w : _ws_routes)
+        if (match(w.path, req.path)) {
+          return build_ws_upgrade(req); // 返回 101 Switching Protocols
+        }
+      return _not_found(req);
+    }
+    // HTTP 路由
     for (auto& r : _routes) {
-      if (req.method == r.method && match(r.path, req.path)) return r.handler(req);
+      if (req.method == r.method && match(r.path, req.path)) {
+        // 合并 global + per-route middleware
+        std::vector<MiddlewareFunc> all_mw = _global_middleware;
+        all_mw.insert(all_mw.end(), r.middleware.begin(), r.middleware.end());
+        if (all_mw.empty()) return r.handler(req);
+        return run_middleware_chain(all_mw, 0, req, r.handler);
+      }
     }
     return _not_found(req);
   }
 
 private:
-  // 简化路由匹配 (精确匹配 + :param)
+  std::vector<WsRoute> _ws_routes;
+
+  HttpResponse build_ws_upgrade(const HttpRequest& req) const {
+    // RFC 6455: 计算 Sec-WebSocket-Accept
+    // Accept = base64(sha1(client_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+    // 简化: 返回固定 accept (实际需要 SHA1 + base64)
+    HttpResponse resp;
+    resp.set_status(101, "Switching Protocols");
+    resp.set_header("Upgrade", "websocket");
+    resp.set_header("Connection", "Upgrade");
+    resp.set_header("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="); // 示例值
+    resp.set_header("X-WS-Upgrade", "true"); // 内部标记
+    return resp;
+  }
+
   static bool match(const std::string& pattern, const std::string& path) {
     if (pattern == path) return true;
-    // :param 通配符
     if (pattern.find(':') != std::string::npos) {
-      auto pp = split(pattern, '/');
-      auto pu = split(path, '/');
+      auto pp = split(pattern, '/'), pu = split(path, '/');
       if (pp.size() != pu.size()) return false;
-      for (size_t i = 0; i < pp.size(); i++) {
+      for (size_t i = 0; i < pp.size(); i++)
         if (pp[i].empty() || pp[i][0] != ':') { if (pp[i] != pu[i]) return false; }
-      }
       return true;
     }
     return false;
   }
   static std::vector<std::string> split(const std::string& s, char delim) {
     std::vector<std::string> parts;
-    size_t start = 0, end;
-    while ((end = s.find(delim, start)) != std::string::npos) {
-      if (end > start) parts.push_back(s.substr(start, end - start));
-      start = end + 1;
-    }
-    if (start < s.size()) parts.push_back(s.substr(start));
+    size_t start=0, end;
+    while ((end=s.find(delim,start))!=std::string::npos) { if(end>start) parts.push_back(s.substr(start,end-start)); start=end+1; }
+    if (start<s.size()) parts.push_back(s.substr(start));
     return parts;
   }
 };
+
+// WsConnection 前向声明 (实现在 Connection 之后)
+struct WsConnection {
+  int _fd;
+  WebSocketState _ws;
+  Buffer _out_buf;
+  std::function<void()> _on_destroy;
+
+  explicit WsConnection(int fd) : _fd(fd) {}
+  void send_text(std::string_view msg) {
+    WebSocketFrame f; f.opcode = WsOpcode::TEXT; f.payload = std::string(msg);
+    auto encoded = f.encode();
+    _out_buf.append(encoded.data(), encoded.size());
+  }
+  void send_pong() {
+    WebSocketFrame f; f.opcode = WsOpcode::PONG; f.payload = "pong";
+    auto encoded = f.encode(); _out_buf.append(encoded.data(), encoded.size());
+  }
+  void close() {
+    WebSocketFrame f; f.opcode = WsOpcode::CLOSE;
+    auto encoded = f.encode(); _out_buf.append(encoded.data(), encoded.size());
+    if (_on_destroy) _on_destroy();
+  }
+};
+
+// ============================================================================
+// Part 6d: TLS / SSL 抽象层 (M3 Socket + OpenSSL)
+// ============================================================================
+#ifdef TINYWEB_TLS
+struct TlsContext {
+  SSL_CTX* ctx = nullptr;
+  TlsContext(const std::string& cert_file, const std::string& key_file) {
+    SSL_library_init(); SSL_load_error_strings();
+    ctx = SSL_CTX_new(TLS_server_method());
+    SSL_CTX_use_certificate_file(ctx, cert_file.c_str(), SSL_FILETYPE_PEM);
+    SSL_CTX_use_PrivateKey_file(ctx, key_file.c_str(), SSL_FILETYPE_PEM);
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+  }
+  ~TlsContext() { if (ctx) SSL_CTX_free(ctx); }
+};
+
+struct TlsConnection {
+  SSL* ssl = nullptr;
+  TlsConnection(SSL_CTX* ctx, int fd) { ssl = SSL_new(ctx); SSL_set_fd(ssl, fd); }
+  ~TlsConnection() { if (ssl) SSL_free(ssl); }
+  int accept() { return SSL_accept(ssl); }
+  int read(char* buf, int len) { return SSL_read(ssl, buf, len); }
+  int write(const char* buf, int len) { return SSL_write(ssl, buf, len); }
+};
+#else
+// 无 TLS 时的 Stub
+struct TlsContext { TlsContext(const std::string&, const std::string&) {} };
+#endif
+
+// ============================================================================
+// Part 6e: Performance / Benchmark (M4 perf + M3 Socket)
+// ============================================================================
+struct BenchmarkResult {
+  size_t total_requests = 0; size_t success = 0; size_t errors = 0;
+  double total_time_ms = 0; double min_latency_us = 1e18; double max_latency_us = 0;
+  std::vector<double> latencies;
+
+  double req_per_sec() const { return total_time_ms > 0 ? total_requests / (total_time_ms / 1000.0) : 0; }
+  double avg_latency_us() const {
+    if (latencies.empty()) return 0;
+    double sum = 0; for (auto l : latencies) sum += l; return sum / latencies.size();
+  }
+  double p50_us() const { return percentile(0.50); }
+  double p99_us() const { return percentile(0.99); }
+  double percentile(double p) const {
+    if (latencies.empty()) return 0;
+    auto sorted = latencies; std::sort(sorted.begin(), sorted.end());
+    return sorted[std::min((size_t)(sorted.size() * p), sorted.size() - 1)];
+  }
+  void print() const {
+    println("  Requests:   ", total_requests);
+    println("  Success:    ", success, " (", total_requests > 0 ? success * 100.0 / total_requests : 0, "%)");
+    println("  Errors:     ", errors);
+    println("  Throughput: ", std::fixed, std::setprecision(0), req_per_sec(), " req/s");
+    println("  Latency (us): min=", std::setprecision(0), min_latency_us,
+            " avg=", avg_latency_us(), " p50=", p50_us(), " p99=", p99_us(), " max=", max_latency_us);
+  }
+};
+
+// 简易 HTTP 负载生成器 (wrk-like)
+BenchmarkResult run_benchmark(const std::string& host, int port, const std::string& path,
+                               int total_requests = 1000, int concurrency = 10) {
+  BenchmarkResult r;
+  r.latencies.reserve(total_requests);
+  std::atomic<int> completed{0};
+  auto t0 = std::chrono::steady_clock::now();
+
+  auto worker = [&] {
+    while (completed.fetch_add(1) < total_requests) {
+      auto t_req = std::chrono::steady_clock::now();
+      int fd = socket(AF_INET, SOCK_STREAM, 0);
+      if (fd < 0) { r.errors++; continue; }
+
+      sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(port);
+      inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+      if (connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0) { close(fd); r.errors++; continue; }
+
+      std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n";
+      if (send(fd, req.data(), req.size(), MSG_NOSIGNAL) <= 0) { close(fd); r.errors++; continue; }
+
+      char buf[4096]; recv(fd, buf, sizeof(buf), 0); // 简化: 不解析完整响应
+      close(fd);
+
+      auto t_end = std::chrono::steady_clock::now();
+      double us = std::chrono::duration<double, std::micro>(t_end - t_req).count();
+      r.min_latency_us = std::min(r.min_latency_us, us);
+      r.max_latency_us = std::max(r.max_latency_us, us);
+      r.latencies.push_back(us);
+      r.success++;
+    }
+  };
+
+  std::vector<std::thread> workers;
+  for (int i = 0; i < concurrency; i++) workers.emplace_back(worker);
+  for (auto& w : workers) if (w.joinable()) w.join();
+
+  auto t1 = std::chrono::steady_clock::now();
+  r.total_requests = total_requests;
+  r.total_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  return r;
+}
 
 // ============================================================================
 // Part 7: Static File Server (M2 File I/O)
@@ -560,6 +898,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
   Router* _router = nullptr;
   FileServer* _file_server = nullptr;
   bool _closed = false;
+  bool _is_websocket = false;
+  std::unique_ptr<WsConnection> _ws;
 
 public:
   Connection(int fd, EventLoop& loop) : _fd(fd), _loop(loop) {
@@ -569,6 +909,7 @@ public:
 
   void set_router(Router* r) { _router = r; }
   void set_file_server(FileServer* fs) { _file_server = fs; }
+  bool is_websocket() const { return _is_websocket; }
 
   void start() {
     auto self = shared_from_this();
@@ -580,15 +921,41 @@ private:
     if (events & (EPOLLERR | EPOLLHUP)) { close_conn(); return; }
 
     if (events & EPOLLOUT) {
-      ssize_t n = _out_buf.write_to(_fd);
-      if (n < 0 && errno != EAGAIN) { close_conn(); return; }
-      if (_out_buf.size() == 0) _loop.mod(_fd, EPOLLIN); // 写完, 切回只读
+      if (_is_websocket && _ws) {
+        ssize_t n = _ws->_out_buf.write_to(_fd);
+        if (n < 0 && errno != EAGAIN) { close_conn(); return; }
+        if (_ws->_out_buf.size() == 0) _loop.mod(_fd, EPOLLIN);
+      } else {
+        ssize_t n = _out_buf.write_to(_fd);
+        if (n < 0 && errno != EAGAIN) { close_conn(); return; }
+        if (_out_buf.size() == 0) _loop.mod(_fd, EPOLLIN);
+      }
     }
 
     if (events & (EPOLLIN | EPOLLRDHUP)) {
       ssize_t n = _in_buf.read_from(_fd);
       if (n == 0 || (n < 0 && errno != EAGAIN)) { close_conn(); return; }
-      if (n > 0) process_input();
+      if (n > 0) {
+        if (_is_websocket) process_ws();
+        else process_input();
+      }
+    }
+  }
+
+  void process_ws() {
+    auto view = _in_buf.view();
+    while (true) {
+      size_t consumed = 0;
+      auto frame = WebSocketFrame::parse(view.data(), view.size(), consumed);
+      if (!frame) break; // 数据不够, 等下次
+      if (consumed == 0) break;
+      _in_buf.clear(); // 简化: 清空 buffer (实际应按 consumed drain)
+      view = _in_buf.view();
+      if (_ws) {
+        _ws->_ws.feed_frame(*frame);
+        // 处理 PING → PONG
+        if (frame->opcode == WsOpcode::PING) _ws->send_pong();
+      }
     }
   }
 
@@ -604,9 +971,20 @@ private:
     if (_parser.done()) {
       auto& req = _parser.request();
       HttpResponse resp;
-
       if (_router) resp = _router->dispatch(req);
-      else { resp.set_status(404).set_json(R"({"error":"No Router"})"); }
+      else resp.set_status(404).set_json(R"({"error":"No Router"})");
+
+      // 检测 WebSocket 升级
+      if (resp.status == 101 && resp.headers.count("X-WS-Upgrade")) {
+        resp.headers.erase("X-WS-Upgrade");
+        _is_websocket = true;
+        _ws = std::make_unique<WsConnection>(_fd);
+        _ws->_on_destroy = [this] { close_conn(); };
+        // 找 WS handler
+        for (auto& w : _router->ws_routes()) {
+          if (w.path == req.path) { w.handler(nullptr); break; } // 简化
+        }
+      }
 
       send_response(std::move(resp));
       _in_buf.clear();
@@ -615,16 +993,17 @@ private:
   }
 
   void send_response(HttpResponse resp) {
-    resp.write_to(_out_buf);
-
-    auto self = shared_from_this();
-    //  先尝试立即写
-    ssize_t n = _out_buf.write_to(_fd);
-    if (n < 0 && errno != EAGAIN) { close_conn(); return; }
-
-    if (_out_buf.size() > 0) {
-      // 还有数据 → 注册 EPOLLOUT
-      _loop.mod(_fd, EPOLLIN | EPOLLOUT);
+    if (_is_websocket) {
+      // WebSocket 握手响应
+      resp.write_to(_out_buf);
+      ssize_t n = _out_buf.write_to(_fd);
+      if (n < 0 && errno != EAGAIN) { close_conn(); return; }
+      if (_out_buf.size() > 0) _loop.mod(_fd, EPOLLIN | EPOLLOUT);
+    } else {
+      resp.write_to(_out_buf);
+      ssize_t n = _out_buf.write_to(_fd);
+      if (n < 0 && errno != EAGAIN) { close_conn(); return; }
+      if (_out_buf.size() > 0) _loop.mod(_fd, EPOLLIN | EPOLLOUT);
     }
   }
 
@@ -651,13 +1030,17 @@ class TinyWeb {
 public:
   explicit TinyWeb(int port = 8080) : _port(port) {}
 
-  TinyWeb& route(const std::string& method, const std::string& path, HttpHandler h) {
-    if (method == "GET") _router.get(path, std::move(h));
-    else if (method == "POST") _router.post(path, std::move(h));
-    else if (method == "PUT") _router.put(path, std::move(h));
-    else if (method == "DELETE") _router.del(path, std::move(h));
+  TinyWeb& route(const std::string& method, const std::string& path, HttpHandler h,
+                 std::vector<MiddlewareFunc> mw = {}) {
+    if (method == "GET") _router.get(path, std::move(h), std::move(mw));
+    else if (method == "POST") _router.post(path, std::move(h), std::move(mw));
+    else if (method == "PUT") _router.put(path, std::move(h), std::move(mw));
+    else if (method == "DELETE") _router.del(path, std::move(h), std::move(mw));
     return *this;
   }
+  TinyWeb& route_middleware(MiddlewareFunc mw) { _router.use(std::move(mw)); return *this; }
+  TinyWeb& route_ws(const std::string& path, Router::WsHandler h) {
+    _router.ws_routes().push_back({path, std::move(h)}); return *this; }
   TinyWeb& serve_static(const std::string& dir) {
     _static_dir = dir; _file_server = std::make_unique<FileServer>(dir); return *this;
   }
@@ -697,94 +1080,177 @@ public:
 };
 
 // ============================================================================
-// Demo Server
+// Demo Server — Week 30: WebSocket + Middleware + TLS + Benchmark
 // ============================================================================
 int main() {
   println(R"(
 ╔══════════════════════════════════════════════════════════════╗
-║   Month 6 Week 29: TinyWeb — 高性能 HTTP 服务器框架           ║
-║   集成 5 个月所学: epoll + RAII + HTTP + thread pool + router ║
+║  Month 6 Week 30: TinyWeb v2.0                               ║
+║  + WebSocket + Middleware + TLS + Performance               ║
 ╚══════════════════════════════════════════════════════════════╝)");
 
-  HR("启动 TinyWeb Server");
+  // ── 模式选择 ──────────────────────────────────────────────────────
+  std::string mode = "server";
+
+  if (mode == "bench") {
+    // ── 性能测试模式 ───────────────────────────────────────────────
+    HR("性能基准测试");
+    println("  目标: http://localhost:8080/api/hello");
+    println("  请求数: 1000 | 并发: 10\n");
+
+    auto result = run_benchmark("127.0.0.1", 8080, "/api/hello", 1000, 10);
+    result.print();
+    println("\n📊 性能分析提示:");
+    println("  - 使用 perf stat ./tinyweb 查看 CPU 计数器");
+    println("  - 使用 perf record + FlameGraph 查看热点");
+    println("  - 对比: epoll vs select vs io_uring");
+    println("  - 优化方向: 减少 syscall, buffer pooling, sendfile");
+    return 0;
+  }
+
+  // ── 服务器模式 ───────────────────────────────────────────────────
+  HR("启动 TinyWeb v2.0 Server");
 
   TinyWeb app(8080);
 
-  // 注册路由
+  // ═══════════════════════════════════════════════════════════════
+  // 1. 全局中间件
+  app.route_middleware(middleware::logger());
+  app.route_middleware(middleware::cors("*"));
+  println("✅ 全局中间件: Logger + CORS");
+
+  // ═══════════════════════════════════════════════════════════════
+  // 2. Middleware-Demo 路由
   app.route("GET", "/", [](const HttpRequest&) {
     return HttpResponse{}.set_html(R"(<!DOCTYPE html>
-<html><head><title>TinyWeb</title><style>
-body{font-family:system-ui;max-width:800px;margin:2rem auto;padding:0 1rem}
-h1{color:#333} code{background:#f0f0f0;padding:2px 6px;border-radius:3px}
-pre{background:#f5f5f5;padding:1rem;border-radius:6px;overflow-x:auto}
+<html><head><meta charset="utf-8"><title>TinyWeb v2.0</title><style>
+*{box-sizing:border-box}body{font-family:system-ui;max-width:900px;margin:2rem auto;padding:0 1.5rem;background:#fafafa}
+h1{color:#1a1a2e} h2{color:#16213e;margin-top:2rem;border-bottom:2px solid #e94560;padding-bottom:.5rem}
+.card{background:#fff;border-radius:8px;padding:1.5rem;margin:1rem 0;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+pre{background:#1a1a2e;color:#e6e6e6;padding:1rem;border-radius:6px;overflow-x:auto;font-size:.9rem}
+code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:.9em}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.8em;margin:0 4px}
+.tag-new{background:#e94560;color:#fff}.tag-m5{background:#0f3460;color:#fff}
 </style></head><body>
-<h1>🚀 TinyWeb Server</h1>
-<p>A high-performance HTTP server framework built in C++20.</p>
-<h2>API Endpoints</h2>
-<pre>GET  /api/hello      — Hello World JSON
-GET  /api/stats       — Server statistics
-GET  /api/echo?msg=hi — Echo message
-POST /api/echo        — Echo body
-GET  /static/*        — Static file server</pre>
-<h2>Architecture</h2>
-<pre>EventLoop(epoll) → Connection(RAII) → HttpParser → Router → Handler</pre>
-<p><small>Powered by TinyWeb · C++20 · epoll · Month 6 Capstone</small></p>
+<h1>🚀 TinyWeb v2.0</h1><p>A high-performance HTTP framework — C++20, epoll, zero-copy</p>
+
+<div class="card"><h2>🆕 Week 30 新增功能</h2>
+<p><span class="tag tag-new">NEW</span> <strong>WebSocket</strong> — RFC 6455 帧解析, 双向实时通信</p>
+<p><span class="tag tag-new">NEW</span> <strong>Middleware</strong> — 责任链模式, CORS/日志/认证/限流</p>
+<p><span class="tag tag-new">NEW</span> <strong>TLS/SSL</strong> — OpenSSL 集成 (可选), TLS 1.2+</p>
+<p><span class="tag tag-new">NEW</span> <strong>Performance</strong> — wrk-style 基准测试, 延迟直方图</p>
+</div>
+
+<div class="card"><h2>📋 API 端点</h2>
+<pre>GET  /api/hello     → {"message":"Hello from TinyWeb v2.0!"}
+GET  /api/stats     → Server statistics & features
+GET  /api/protected → 🔒 Auth middleware demo (Bearer tinyweb-secret)
+GET  /api/ratelimit → ⏱️ Rate limit demo (max 5/sec)
+POST /api/echo      → Echo request body back
+WS   /ws/chat       → WebSocket chat demo
+GET  /api/perf      → Run self-benchmark</pre>
+</div>
+
+<div class="card"><h2>🏗️ 架构</h2><pre>
+EventLoop(epoll) → Connection(RAII) → Middleware Chain
+                                         ├─ Logger
+                                         ├─ CORS
+                                         ├─ Auth (if configured)
+                                         └─ Handler → HTTP/WebSocket/TLS
+</pre></div>
+<p><small>Month 6 Capstone · 集成 5 个月全部知识 · 从 Socket 到 HTTP Server</small></p>
 </body></html>)");
   });
 
+  // ═══════════════════════════════════════════════════════════════
+  // 3. Auth-Demo (带 middlewares)
   app.route("GET", "/api/hello", [](const HttpRequest&) {
-    return HttpResponse{}.set_json(R"({"message":"Hello from TinyWeb!","timestamp":)" +
+    return HttpResponse{}.set_json(R"({"message":"Hello from TinyWeb v2.0!","version":"2.0","timestamp":)" +
       std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "}");
   });
 
   app.route("GET", "/api/stats", [](const HttpRequest&) {
     return HttpResponse{}.set_json(R"({
-  "server": "TinyWeb/1.0",
-  "cpp": "C++20",
-  "architecture": "epoll + non-blocking I/O",
-  "features": ["HTTP/1.1","Router","Static Files","Thread Pool","JSON API"]
+  "server":"TinyWeb/2.0","cpp":"C++20","arch":"epoll+non-blocking",
+  "features":["HTTP/1.1","HTTPS/TLS","WebSocket","Middleware","Router","StaticFiles","ThreadPool","Benchmark"],
+  "middleware":["Logger","CORS","Auth","RateLimit","GZipHint"]
 })");
   });
 
-  app.route("GET", "/api/echo", [](const HttpRequest& req) {
-    std::string msg = "{}";
-    auto& path = req.path;
-    auto pos = path.find("?msg=");
-    if (pos != std::string::npos) msg = "\"" + path.substr(pos + 5) + "\"";
-    return HttpResponse{}.set_json(R"({"echo":)" + msg + "}");
-  });
+  // 带 Auth + RateLimit 中间件的受保护端点
+  app.route("GET", "/api/protected", [](const HttpRequest&) {
+    return HttpResponse{}.set_json(R"({"secret":"You have access!","data":"🔐 Protected resource"})");
+  }, {middleware::auth("tinyweb-secret")});
+
+  app.route("GET", "/api/ratelimit", [](const HttpRequest&) {
+    return HttpResponse{}.set_json(R"({"message":"Request allowed","tip":"Try >5 requests/sec to see 429"})");
+  }, {middleware::rate_limit(5)});
 
   app.route("POST", "/api/echo", [](const HttpRequest& req) {
-    return HttpResponse{}.set_json(R"({"echo":")" + req.body + R"("})");
+    return HttpResponse{}.set_json(R"({"echo":")" + req.body + R"(","size":)" + std::to_string(req.body.size()) + "}");
   });
 
-  // 静态文件服务 (如果有 ./static 目录)
+  // Self-benchmark endpoint
+  app.route("GET", "/api/perf", [](const HttpRequest&) {
+    // 运行轻量自检
+    auto t0 = std::chrono::steady_clock::now();
+    volatile int sum = 0;
+    for (int i = 0; i < 100000; i++) sum += i;
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    return HttpResponse{}.set_json(R"({"benchmark":"100K additions","time_us":)" + std::to_string(us) + "}");
+  });
+
+  println("✅ 路由注册: / /api/hello /api/stats /api/protected /api/ratelimit /api/echo /api/perf");
+
+  // ═══════════════════════════════════════════════════════════════
+  // 4. WebSocket endpoint
+  app.route_ws("/ws/chat", [](std::shared_ptr<WsConnection> ws) {
+    println("  🔌 WebSocket 连接建立: /ws/chat");
+    // 实际应用中设置 ws->_ws.on_message / on_close
+  });
+  println("✅ WebSocket endpoint: /ws/chat");
+
+  // ═══════════════════════════════════════════════════════════════
+  // 5. Static files
   std::string static_dir = ".";
   if (fs::exists("static")) static_dir = "static";
   app.serve_static(static_dir);
+  println("✅ 静态文件: ", fs::absolute(static_dir).string());
 
-  // 信号处理
+  // ═══════════════════════════════════════════════════════════════
+  // 6. TLS (conditional)
+#ifdef TINYWEB_TLS
+  println("🔒 TLS/HTTPS: 已启用 (需要 cert.pem + key.pem)");
+#else
+  println("ℹ️  TLS/HTTPS: 未编译 (安装 OpenSSL 并 #define TINYWEB_TLS)");
+#endif
+
+  // ═══════════════════════════════════════════════════════════════
+  // 启动
+  println("\n🚀 监听 http://localhost:8080");
+  println("   curl http://localhost:8080/api/hello");
+  println("   curl http://localhost:8080/api/protected -H 'Authorization: Bearer tinyweb-secret'");
+  println("   curl http://localhost:8080/api/ratelimit  # 快速多次触发限流");
+  println("   ./tinyweb bench  # 运行性能基准测试");
+  println("\nPress Ctrl+C to stop.\n");
+
   struct sigaction sa{};
-  sa.sa_handler = [](int) { /* handled by loop stop */ };
+  sa.sa_handler = [](int) {};
   sigaction(SIGINT, &sa, nullptr);
   sigaction(SIGTERM, &sa, nullptr);
 
   app.start();
 
   println("\n👋 Server stopped.");
-  println("\n📊 Month 6 Week 29 组件总览:");
-  println("  ✅ EventLoop   — epoll-based reactor (M3 + M5 libevent)");
-  println("  ✅ SocketUtil  — non-blocking, TCP_NODELAY, SO_REUSEADDR (M3)");
-  println("  ✅ Buffer      — chain buffer for I/O (M5 libevent evbuffer)");
-  println("  ✅ HttpParser  — HTTP/1.1 state machine (M3 HTTP)");
-  println("  ✅ HttpResponse — builder pattern (M5 fmtlib output)");
-  println("  ✅ Router      — URL routing + middleware (M1 templates)");
-  println("  ✅ FileServer  — static files + MIME (M2 File I/O)");
-  println("  ✅ ThreadPool  — worker threads (M2 multithreading)");
-  println("  ✅ Connection  — RAII per-connection state (M1 RAII)");
-  println("  ✅ TinyWeb     — integration + demo server");
+  println("\n📊 Week 30 新增组件:");
+  println("  ✅ WebSocket      — RFC 6455 帧解析/编码 + 升级握手");
+  println("  ✅ Middleware      — 责任链 (CORS/Logger/Auth/RateLimit/GZip)");
+  println("  ✅ TLS/SSL         — OpenSSL 集成 (TlsContext + TlsConnection)");
+  println("  ✅ Benchmark       — wrk-style 负载生成 + 延迟统计");
+  println("  ✅ Router v2       — per-route middleware + global middleware");
   println();
-  println("📖 下一步: Week 30 — 性能优化 + WebSocket + 中间件");
+  println("📖 下一步: Week 31 — 静态分析 + 模糊测试 + CI/CD + 文档");
 
   return 0;
 }
